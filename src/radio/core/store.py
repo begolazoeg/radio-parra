@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -76,7 +76,15 @@ CREATE TABLE IF NOT EXISTS inbox (
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(UTC).isoformat()
+
+
+def _deserialize_row(row: sqlite3.Row) -> dict[str, Any]:
+    """Convierte una fila de SQLite a dict, deserializando campos JSON."""
+    d = dict(row)
+    if "tags" in d and isinstance(d["tags"], str):
+        d["tags"] = json.loads(d["tags"])
+    return d
 
 
 # ── Clase principal ───────────────────────────────────────────────────────────
@@ -152,7 +160,7 @@ class DB:
         row = self._conn.execute(
             "SELECT * FROM segments WHERE id = ?", (id,)
         ).fetchone()
-        return dict(row) if row else None
+        return _deserialize_row(row) if row else None
 
     def list_segments(
         self,
@@ -170,7 +178,7 @@ class DB:
             params.append(status)
         query += " ORDER BY created_at DESC"
         rows = self._conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
+        return [_deserialize_row(r) for r in rows]
 
     def update_segment_status(self, id: str, status: str) -> None:
         """Actualiza el status de un segmento existente."""

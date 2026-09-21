@@ -85,6 +85,27 @@ def test_atomic_write_pattern(db: DB) -> None:
     assert seg["audio_path"] == str(final_path)
 
 
+# ── test_tags_deserialized ────────────────────────────────────────────────────
+
+def test_tags_deserialized_as_list(db: DB) -> None:
+    """get_segment y list_segments devuelven tags como lista, no como JSON string."""
+    db.add_segment(
+        id="tagged_001",
+        kind="factual",
+        title="Tagged segment",
+        duration_s=60.0,
+        producer="p",
+        tags=["news", "science"],
+    )
+    seg = db.get_segment("tagged_001")
+    assert seg is not None
+    assert isinstance(seg["tags"], list), f"expected list, got {type(seg['tags'])}"
+    assert seg["tags"] == ["news", "science"]
+
+    rows = db.list_segments(kind="factual")
+    assert isinstance(rows[0]["tags"], list)
+
+
 # ── test_producer_run_log ─────────────────────────────────────────────────────
 
 def test_producer_run_log(db: DB) -> None:

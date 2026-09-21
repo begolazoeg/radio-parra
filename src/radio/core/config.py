@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 # ── Modelos de sub-configuración ──────────────────────────────────────────────
 
@@ -17,7 +17,7 @@ class ProviderSettings(BaseModel):
     """Configuración de un proveedor externo (LLM, TTS, etc.)."""
     name: str
     model: str | None = None
-    extra: dict[str, Any] = {}
+    extra: dict[str, Any] = Field(default_factory=dict)
 
 
 class StationConfig(BaseModel):
@@ -27,7 +27,7 @@ class StationConfig(BaseModel):
     data_dir: str = "data"
     budget_monthly_eur: float = 10.0
     loudness_lufs: float = -16.0
-    providers: dict[str, ProviderSettings] = {}
+    providers: dict[str, ProviderSettings] = Field(default_factory=dict)
 
 
 class TimeSlot(BaseModel):
@@ -52,7 +52,7 @@ class GridConfig(BaseModel):
     timezone: str = "Europe/Madrid"
     talk_budget_ratio: float = 0.3
     cooldowns_minutes: Cooldowns = Cooldowns()
-    slots: list[TimeSlot] = []
+    slots: list[TimeSlot] = Field(default_factory=list)
     time_signal_enabled: bool = True
 
 
@@ -75,19 +75,19 @@ class VoiceEntry(BaseModel):
 
 class VoicesConfig(BaseModel):
     """Lista de voces disponibles (voices.yaml)."""
-    voices: list[VoiceEntry] = []
+    voices: list[VoiceEntry] = Field(default_factory=list)
 
 
 class ProducerSettings(BaseModel):
     """Configuración de un producer individual."""
     active: bool = False
     interval_minutes: int = 60
-    extra: dict[str, Any] = {}
+    extra: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProducersConfig(BaseModel):
     """Mapa de producers y su configuración (producers.yaml)."""
-    producers: dict[str, ProducerSettings] = {}
+    producers: dict[str, ProducerSettings] = Field(default_factory=dict)
 
 
 # ── RadioConfig: carga los 4 archivos ─────────────────────────────────────────

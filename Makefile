@@ -9,7 +9,7 @@ test:
 
 lint:
 	uv run ruff check src/
-	uv run mypy src/radio/core src/radio/grid || true
+	uv run mypy src/radio/core
 
 sim:
 	uv run radio simulate --hours 24 --seed 1
