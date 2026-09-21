@@ -4,7 +4,7 @@ Protocolo base para proveedores LLM.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from radio.core.models import LLMResult
 
@@ -19,7 +19,7 @@ class LLM(Protocol):
         user: str,
         *,
         temperature: float,
-        json_schema: Optional[dict[str, Any]] = None,
+        json_schema: dict[str, Any] | None = None,
         max_tokens: int = 1000,
     ) -> LLMResult:
         ...

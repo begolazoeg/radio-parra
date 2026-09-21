@@ -6,19 +6,17 @@ Carga los 4 archivos YAML desde config/ sin requerir .env.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
-from pydantic import BaseModel, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
+from pydantic import BaseModel, field_validator
 
 # ── Modelos de sub-configuración ──────────────────────────────────────────────
 
 class ProviderSettings(BaseModel):
     """Configuración de un proveedor externo (LLM, TTS, etc.)."""
     name: str
-    model: Optional[str] = None
+    model: str | None = None
     extra: dict[str, Any] = {}
 
 
@@ -116,7 +114,7 @@ class RadioConfig(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
     @classmethod
-    def load(cls, config_dir: Path = Path("config")) -> "RadioConfig":
+    def load(cls, config_dir: Path = Path("config")) -> RadioConfig:
         """Carga todos los archivos de configuración desde config_dir."""
         station_data = _load_yaml(config_dir / "station.yaml")
         grid_data = _load_yaml(config_dir / "grid.yaml")

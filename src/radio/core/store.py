@@ -11,8 +11,7 @@ import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
-
+from typing import Any
 
 # ── Esquema ───────────────────────────────────────────────────────────────────
 
@@ -110,14 +109,14 @@ class DB:
         id: str,
         kind: str,
         status: str = "pending",
-        created_at: Optional[str] = None,
+        created_at: str | None = None,
         title: str,
         duration_s: float = 0.0,
-        audio_path: Optional[Path] = None,
+        audio_path: Path | None = None,
         producer: str,
-        source_url: Optional[str] = None,
-        script: Optional[str] = None,
-        voice_id: Optional[str] = None,
+        source_url: str | None = None,
+        script: str | None = None,
+        voice_id: str | None = None,
         tags: list[str] | None = None,
     ) -> None:
         """
@@ -148,7 +147,7 @@ class DB:
         )
         self._conn.commit()
 
-    def get_segment(self, id: str) -> Optional[dict[str, Any]]:
+    def get_segment(self, id: str) -> dict[str, Any] | None:
         """Devuelve un segmento por id o None si no existe."""
         row = self._conn.execute(
             "SELECT * FROM segments WHERE id = ?", (id,)
@@ -157,8 +156,8 @@ class DB:
 
     def list_segments(
         self,
-        kind: Optional[str] = None,
-        status: Optional[str] = None,
+        kind: str | None = None,
+        status: str | None = None,
     ) -> list[dict[str, Any]]:
         """Lista segmentos con filtros opcionales por kind y/o status."""
         query = "SELECT * FROM segments WHERE 1=1"
@@ -185,8 +184,8 @@ class DB:
     def log_play(
         self,
         segment_id: str,
-        started_at: Optional[str] = None,
-        ended_at: Optional[str] = None,
+        started_at: str | None = None,
+        ended_at: str | None = None,
         interrupted: bool = False,
     ) -> int:
         """Registra la reproducción de un segmento. Devuelve el rowid."""
@@ -205,10 +204,10 @@ class DB:
     def log_producer_run(
         self,
         producer: str,
-        started_at: Optional[str] = None,
-        ended_at: Optional[str] = None,
+        started_at: str | None = None,
+        ended_at: str | None = None,
         status: str = "ok",
-        detail: Optional[str] = None,
+        detail: str | None = None,
     ) -> int:
         """Registra una ejecución de un producer. Devuelve el rowid."""
         cur = self._conn.execute(
@@ -223,7 +222,7 @@ class DB:
 
     # ── Universe state ────────────────────────────────────────────────────────
 
-    def get_universe_state(self, key: str) -> Optional[Any]:
+    def get_universe_state(self, key: str) -> Any | None:
         """Devuelve el valor JSON almacenado para key, o None."""
         row = self._conn.execute(
             "SELECT value FROM universe_state WHERE key = ?", (key,)
@@ -268,7 +267,7 @@ class DB:
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
 
-    def list_inbox(self, status: Optional[str] = None) -> list[dict[str, Any]]:
+    def list_inbox(self, status: str | None = None) -> list[dict[str, Any]]:
         """Lista mensajes del inbox, opcionalmente filtrados por status."""
         if status:
             rows = self._conn.execute(

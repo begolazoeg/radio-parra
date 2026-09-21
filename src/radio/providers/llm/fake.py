@@ -6,7 +6,7 @@ Devuelve fixtures configurables y registra todas las llamadas.
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any
 
 from radio.core.models import LLMResult
 
@@ -28,7 +28,7 @@ class FakeLLM:
         user: str,
         *,
         temperature: float,
-        json_schema: Optional[dict[str, Any]] = None,
+        json_schema: dict[str, Any] | None = None,
         max_tokens: int = 1000,
     ) -> LLMResult:
         # Registra la llamada para aserciones en tests
