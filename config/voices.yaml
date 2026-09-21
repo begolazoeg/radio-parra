@@ -1,0 +1,23 @@
+# Voces disponibles para TTS
+# consent: true es OBLIGATORIO — no se puede usar una voz sin consentimiento explícito
+voices:
+  - id: "host_main"
+    name: "Locutora Principal"
+    provider: "elevenlabs"
+    consent: true
+    language: "es"
+    description: "Voz principal de la emisora, cálida y cercana"
+
+  - id: "host_news"
+    name: "Locutora Noticias"
+    provider: "elevenlabs"
+    consent: true
+    language: "es"
+    description: "Voz para segmentos factuales, clara y precisa"
+
+  - id: "narrator_fiction"
+    name: "Narrador Ficción"
+    provider: "elevenlabs"
+    consent: true
+    language: "es"
+    description: "Voz narrativa para los universos de ficción"

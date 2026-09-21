@@ -1,0 +1,17 @@
+# Configuración global de la emisora Radio Parra
+timezone: "Europe/Madrid"
+language: "es"
+data_dir: "data"
+
+# Presupuesto mensual en euros para APIs externas
+budget_monthly_eur: 10.0
+
+# Nivel de loudness objetivo (EBU R128)
+loudness_lufs: -16.0
+
+providers:
+  llm:
+    name: "anthropic"
+    model: "claude-3-haiku-20240307"
+  tts:
+    name: "elevenlabs"

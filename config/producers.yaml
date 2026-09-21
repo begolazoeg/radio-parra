@@ -1,0 +1,27 @@
+# Configuración de producers
+# active: false por defecto — activar explícitamente cuando estén implementados
+producers:
+  music:
+    active: false
+    interval_minutes: 0
+    extra: {}
+
+  host_intro:
+    active: false
+    interval_minutes: 30
+    extra: {}
+
+  factual:
+    active: false
+    interval_minutes: 20
+    extra: {}
+
+  fiction:
+    active: false
+    interval_minutes: 60
+    extra: {}
+
+  time_signal:
+    active: false
+    interval_minutes: 60
+    extra: {}
