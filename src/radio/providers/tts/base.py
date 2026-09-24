@@ -16,6 +16,11 @@ class TTS(Protocol):
     Interfaz mínima que todo proveedor TTS debe implementar (§4.1).
     Escribe el audio de ``text`` con ``voice`` en ``out_path`` (normalmente dentro
     de ``data/tmp/``; el llamador lo mueve después al stock).
+
+    Opcional: ``preflight(voice)`` comprueba sin sintetizar (ni red ni coste) que la
+    voz se puede usar y lanza ``ProviderNotAvailable``/``TTSError`` si no. Los
+    productores de pago lo llaman antes del LLM (``radio.producers.base.preflight``)
+    para no pagar un guion que luego no se podría locutar.
     """
 
     def synthesize(self, text: str, voice: Voice, out_path: Path) -> AudioInfo:

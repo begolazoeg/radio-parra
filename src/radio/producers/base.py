@@ -403,6 +403,20 @@ def call_llm(
     return result
 
 
+def preflight(ctx: ProducerContext, voice: Voice | None) -> None:
+    """
+    Antes de gastar: el LLM y el TTS del contexto se pueden usar (``preflight`` de
+    cada proveedor, si lo tiene; sin red). Lanza ``ProviderNotAvailable``/``TTSError``
+    y la ejecución falla sin haber llamado al LLM (p. ej. falta el modelo de Piper).
+    """
+    llm_check = getattr(ctx.llm, "preflight", None)
+    if callable(llm_check):
+        llm_check()
+    tts_check = getattr(ctx.tts, "preflight", None)
+    if voice is not None and callable(tts_check):
+        tts_check(voice)
+
+
 # ── Regla de gasto ────────────────────────────────────────────────────────────
 
 def month_start(now: datetime, tz: ZoneInfo) -> datetime:

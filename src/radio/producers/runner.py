@@ -215,6 +215,9 @@ class UnavailableLLM:
     def __init__(self, reason: str) -> None:
         self.reason = reason
 
+    def preflight(self) -> None:
+        raise ProviderNotAvailable(self.reason)
+
     def complete(
         self,
         system: str,
@@ -232,6 +235,9 @@ class UnavailableTTS:
 
     def __init__(self, reason: str) -> None:
         self.reason = reason
+
+    def preflight(self, voice: Voice) -> None:
+        raise ProviderNotAvailable(self.reason)
 
     def synthesize(self, text: str, voice: Voice, out_path: Path) -> AudioInfo:
         raise ProviderNotAvailable(self.reason)

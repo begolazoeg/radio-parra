@@ -92,7 +92,8 @@ class CloudTTS:
     def close(self) -> None:
         self._client.close()
 
-    def synthesize(self, text: str, voice: Voice, out_path: Path) -> AudioInfo:
+    def preflight(self, voice: Voice) -> str:
+        """Comprueba, sin red, que ``voice`` se puede usar; devuelve su id en el proveedor."""
         require_consent(voice)
         if voice.provider not in CLOUD_VOICE_PROVIDERS:
             raise TTSError(
@@ -101,6 +102,10 @@ class CloudTTS:
         voice_id = voice.provider_voice_id.strip()
         if not voice_id or voice_id.startswith("<"):
             raise TTSError(f"la voz {voice.id!r} no tiene provider_voice_id (voices.yaml)")
+        return voice_id
+
+    def synthesize(self, text: str, voice: Voice, out_path: Path) -> AudioInfo:
+        voice_id = self.preflight(voice)
         if not text.strip():
             raise TTSError("texto vacío: nada que sintetizar")
 

@@ -81,14 +81,17 @@ class PiperTTS:
     def model_path(self, voice: Voice) -> Path:
         return resolve_model(voice.provider_voice_id, self.models_dir)
 
-    def synthesize(self, text: str, voice: Voice, out_path: Path) -> AudioInfo:
+    def preflight(self, voice: Voice) -> str:
+        """
+        Comprueba, sin sintetizar, que ``voice`` se puede usar: consentimiento,
+        proveedor, binario y modelo (+ ``.onnx.json``). Devuelve la ruta del binario.
+        Los productores lo llaman antes de gastar en el LLM.
+        """
         require_consent(voice)
         if voice.provider not in PIPER_VOICE_PROVIDERS:
             raise TTSError(
                 f"la voz {voice.id!r} es del proveedor {voice.provider!r}, no de Piper"
             )
-        if not text.strip():
-            raise TTSError("texto vacío: nada que sintetizar")
         binary = find_binary(self.binary)
         if binary is None:
             raise ProviderNotAvailable(f"no se encuentra el binario de Piper {self.binary!r}")
@@ -100,6 +103,13 @@ class PiperTTS:
             )
         if not model.with_name(model.name + ".json").is_file():
             raise ProviderNotAvailable(f"falta la configuración del modelo {model}.json")
+        return binary
+
+    def synthesize(self, text: str, voice: Voice, out_path: Path) -> AudioInfo:
+        binary = self.preflight(voice)
+        if not text.strip():
+            raise TTSError("texto vacío: nada que sintetizar")
+        model = self.model_path(voice)
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         cmd = [binary, "--model", str(model), "--output_file", str(out_path), *self.args]

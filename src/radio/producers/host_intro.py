@@ -85,6 +85,7 @@ from radio.producers.base import (
     StagedProducer,
     call_llm,
     pick_voice,
+    preflight,
 )
 from radio.providers.errors import LLMInvalidOutput, LLMRefusal, LLMTruncated
 from radio.sources import RateLimiter, SourceCache, gather_artist_sources, source_meta
@@ -452,6 +453,9 @@ class HostIntroProducer(StagedProducer):
             return []
         now = ctx.clock.now()
         chosen = self.candidates(ctx, now)[:wanted]
+        if chosen:
+            # Sin LLM o sin voz no se consulta ninguna fuente ni se paga ningún guion
+            preflight(ctx, pick_voice(ctx.config, str(self.param("voice_id"))))
         drafts = [self.draft_for(ctx, m) for m in chosen]
         logger.info("%s: %d intros por escribir (%d con fuentes)", self.name, len(drafts),
                     sum(1 for d in drafts if d.sources))
@@ -711,6 +715,7 @@ class HostIntroProducer(StagedProducer):
             music = candidates[0]
         stats0 = (ctx.stats.cost_eur, ctx.stats.tokens_in, ctx.stats.tokens_out,
                   ctx.stats.tts_chars)
+        preflight(ctx, pick_voice(ctx.config, str(self.param("voice_id"))))
         with self.sources_session(ctx):
             draft = self.draft_for(ctx, music)
         segment: Segment | None = None

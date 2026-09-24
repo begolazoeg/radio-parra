@@ -355,3 +355,37 @@ def test_meta_is_json_serializable(tmp_path: Path) -> None:
     add_music(ctx.db, tmp_path, "m1")
     run_producer(ctx, HostIntroProducer(ctx.config, source_gatherer=fake_sources))
     json.dumps(intros(ctx)[0].meta)
+
+
+# ── Antes de gastar: el LLM y la voz tienen que estar disponibles ────────────
+
+def test_missing_piper_model_fails_before_paying_the_llm(tmp_path: Path) -> None:
+    from radio.providers.tts.piper import PiperTTS
+    from tests.fixtures.providers import install_fake_piper
+
+    piper = PiperTTS(binary=str(install_fake_piper(tmp_path)), models_dir=tmp_path / "vacío")
+    llm = FakeLLM(GOOD)
+    ctx = make_ctx(tmp_path, llm, tts=CachedTTS(piper, tmp_path / "tts-cache"))
+    add_music(ctx.db, tmp_path, "m1")
+    mock = SourcesMock()
+    run = run_producer(ctx, producer_with_mock(ctx, mock))
+    assert not run.ok and "falta el modelo de voz de Piper" in (run.error or "")
+    assert llm.calls == [] and mock.requests == []
+
+
+def test_unavailable_llm_fails_without_network(tmp_path: Path) -> None:
+    from radio.producers.runner import UnavailableLLM
+
+    ctx = make_ctx(tmp_path, UnavailableLLM("no hay credenciales de Claude"))
+    add_music(ctx.db, tmp_path, "m1")
+    mock = SourcesMock()
+    run = run_producer(ctx, producer_with_mock(ctx, mock))
+    assert not run.ok and "credenciales" in (run.error or "") and mock.requests == []
+
+
+def test_nothing_to_do_needs_no_providers(tmp_path: Path) -> None:
+    from radio.producers.runner import UnavailableLLM
+
+    ctx = make_ctx(tmp_path, UnavailableLLM("sin clave"))
+    run = run_producer(ctx, producer_with_mock(ctx))       # sin música: nada que hacer
+    assert run.ok and run.segment_ids == ()

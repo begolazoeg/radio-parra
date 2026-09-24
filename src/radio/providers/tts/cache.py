@@ -58,6 +58,12 @@ class CachedTTS:
         base = self.cache_dir / key[:2] / key
         return base.with_suffix(".audio"), base.with_suffix(".json")
 
+    def preflight(self, voice: Voice) -> None:
+        """Delega en ``inner.preflight`` si lo tiene (ver ``radio.providers.tts.base``)."""
+        check = getattr(self.inner, "preflight", None)
+        if callable(check):
+            check(voice)
+
     def synthesize(self, text: str, voice: Voice, out_path: Path) -> AudioInfo:
         key = self.key(text, voice)
         audio, meta = self._paths(key)
