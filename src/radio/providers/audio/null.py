@@ -1,6 +1,9 @@
 """
 Backend de audio nulo para tests y simulación sin hardware.
 Registra todas las llamadas pero no reproduce nada.
+
+No emite eventos: para simular la cola con ``Started``/``Ended`` de forma
+determinista está ``FakeEventBackend`` (``radio.providers.audio.fake``).
 """
 
 from __future__ import annotations
