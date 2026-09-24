@@ -128,3 +128,37 @@ def import_music(
     typer.echo(f"Fallidas: {len(report.failed)}")
     for failed in report.failed:
         typer.echo(f"  - {failed}")
+
+
+@app.command()
+def simulate(
+    hours: float = typer.Option(24.0, "--hours", help="Horas de emisión simuladas"),
+    seed: int = typer.Option(1, "--seed", help="Semilla (misma semilla → mismo informe)"),
+    json_out: bool = typer.Option(False, "--json", help="Informe en JSON"),
+    config_dir: Path = typer.Option(  # noqa: B008
+        Path("config"), "--config-dir", help="Directorio de configuración"
+    ),
+    prompts_dir: Path = typer.Option(  # noqa: B008
+        Path("prompts"), "--prompts-dir", help="Directorio de plantillas de prompts"
+    ),
+    start: str | None = typer.Option(
+        None, "--start", help="Inicio ISO 8601 (naive = hora local de la emisora)"
+    ),
+) -> None:
+    """
+    Simula N horas de emisión en memoria (reloj falso, sin audio) y comprueba invariantes.
+    """
+    from datetime import datetime  # noqa: PLC0415
+
+    from radio.core.config import RadioConfig  # noqa: PLC0415
+    from radio.sim import SIM_START, run_simulation  # noqa: PLC0415
+
+    config = RadioConfig.load(config_dir)
+    start_dt = datetime.fromisoformat(start) if start else SIM_START
+    report = run_simulation(
+        hours=hours, seed=seed, config=config, prompts_dir=prompts_dir, start=start_dt
+    )
+    typer.echo(report.to_json() if json_out else report.to_text())
+    if not report.passed:
+        raise typer.Exit(1)
+
