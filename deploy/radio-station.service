@@ -1,0 +1,38 @@
+# Radio Parra — emisora (`radio station`). Ejemplo de unidad systemd.
+#
+# Instalación: ver deploy/README.md. Sustituye /opt/radio-parra por la ruta real
+# del checkout (WorkingDirectory y ExecStart).
+#
+# La emisora NO depende de la red (ARCHITECTURE.md §1 inv. 2): solo se *ordena*
+# después de network-online.target (para que el reloj NTP y los adaptadores lo
+# tengan fácil si hay red), pero no hay Wants=/Requires= sobre ella: sin red,
+# arranca igual y emite desde disco.
+
+[Unit]
+Description=Radio Parra — emisora
+Documentation=file:///opt/radio-parra/ARCHITECTURE.md
+After=sound.target network-online.target
+# Nunca rendirse: sin límite de reinicios por intervalo
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=radio
+Group=radio
+# Acceso a la tarjeta de sonido (ALSA) para mpv
+SupplementaryGroups=audio
+WorkingDirectory=/opt/radio-parra
+# Claves y ajustes opcionales; el guion "-" hace que no falle si no existe
+EnvironmentFile=-/opt/radio-parra/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/radio-parra/.venv/bin/radio station
+Restart=always
+RestartSec=2
+# SIGTERM → la emisora corta el audio y cierra la BD; mpv (hijo) cae con el cgroup
+KillMode=control-group
+TimeoutStopSec=15
+# Algo de prioridad para que el audio no tartamudee cuando producen los jobs
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

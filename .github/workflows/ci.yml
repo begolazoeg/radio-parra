@@ -20,10 +20,13 @@ jobs:
         run: uv sync --extra dev
 
       - name: Lint (ruff)
-        run: uv run ruff check src/
+        run: uv run ruff check src/ tests/
 
       - name: Type check (mypy)
-        run: uv run mypy src/radio/core/ --ignore-missing-imports
+        run: uv run mypy src/radio
 
       - name: Test (pytest)
         run: uv run pytest tests/ -v
+
+      - name: Simulation (6 h, seed 1, mismo motor que la emisora)
+        run: uv run radio simulate --hours 6 --seed 1

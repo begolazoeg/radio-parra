@@ -8,8 +8,8 @@ test:
 	uv run pytest tests/ -v
 
 lint:
-	uv run ruff check src/
-	uv run mypy src/radio/core
+	uv run ruff check src/ tests/
+	uv run mypy src/radio
 
 sim:
 	uv run radio simulate --hours 24 --seed 1

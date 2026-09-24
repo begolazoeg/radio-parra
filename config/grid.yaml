@@ -1,35 +1,41 @@
-# Configuración de la parrilla de programación — ejemplo Madrid
-timezone: "Europe/Madrid"
+# Parrilla de programación (§5 de ARCHITECTURE.md). La interpreta radio.grid.
+# Horas en hora local de `timezone`; `from` incluido, `to` excluido;
+# si `to` < `from` la franja cruza la medianoche; "00:00"–"24:00" = todo el día.
+timezone: Europe/Madrid
 
-# Porcentaje máximo de tiempo de antena dedicado a palabra (host, factual, ficción)
-talk_budget_ratio: 0.30
+# Invariante §1.8: como mucho un 22 % de palabra en cualquier ventana móvil de 60 min
+# (cuenta todo lo que no sea music/jingle/stinger, incluida la señal horaria).
+talk_budget: { window_minutes: 60, max_ratio: 0.22 }
 
-# Cooldowns mínimos entre segmentos del mismo tipo (minutos)
-cooldowns_minutes:
-  factual: 15
-  fiction: 30
-  time_signal: 55
-  jingle: 10
+# Minutos mínimos entre dos emisiones del mismo kind (mapa abierto; kind ausente = 0).
+cooldowns_minutes: { consultorio: 90, horoscope: 720, weather: 180, jingle: 10 }
 
-# Señal horaria activada
-time_signal_enabled: true
-
-# Franjas horarias
-slots:
-  - name: "manana"
-    start: "07:00"
-    end: "13:00"
-    music_ratio: 0.65
-    max_talk_run_min: 4
-
-  - name: "tarde"
-    start: "13:00"
-    end: "21:00"
-    music_ratio: 0.70
-    max_talk_run_min: 3
-
-  - name: "noche"
-    start: "21:00"
-    end: "07:00"
-    music_ratio: 0.80
-    max_talk_run_min: 2
+# Huecos de `pattern`: music | talk | jingle.
+#  - talk: kind elegido por pesos de `talk_pool` (kinds sin stock simplemente no salen).
+#  - jingle: identificativo de emisora (además separa factual de ficción, §1.4).
+# Los jingles también se usan como relleno corto antes de una interrupción.
+modes:
+  default:
+    interrupts:
+      - kind: time_signal
+        when: "minute == 0"          # también vale "minute in [0, 30]"
+        max_late_seconds: 90
+    dayparts:
+      - name: manana
+        from: "07:00"
+        to: "12:00"
+        pattern: [music, talk, music, jingle, music]
+        talk_pool: { weather: 3, ephemeris: 2, horoscope: 2, word_of_day: 1 }
+      - name: tarde
+        from: "12:00"
+        to: "20:00"
+        pattern: [music, music, talk, jingle]
+        talk_pool: { consultorio: 3, liga: 2, artist_fact: 2, trivia: 1 }
+      - name: noche
+        from: "20:00"
+        to: "07:00"
+        pattern: [music, music, music, talk, jingle]
+        talk_pool: { radionovela: 3, interview: 2 }
+  # Solo música (+ intros del locutor vinculadas a cada canción); sin señal horaria.
+  tinydesk:
+    dayparts: [{ name: todo, from: "00:00", to: "24:00", pattern: [music], talk_pool: {} }]

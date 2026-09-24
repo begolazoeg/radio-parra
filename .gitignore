@@ -33,3 +33,4 @@ htmlcov/
 .idea/
 *.swp
 *.swo
+.claude/worktrees/

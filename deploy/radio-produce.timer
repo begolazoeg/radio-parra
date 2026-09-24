@@ -1,0 +1,17 @@
+# Radio Parra — dispara radio-produce.service cada 15 minutos (§10).
+# El ritmo real de cada productor lo marcan su `cron` y su déficit en
+# config/producers.yaml; el timer solo es el "latido" que los revisa.
+
+[Unit]
+Description=Radio Parra: revisar stock cada 15 min
+
+[Timer]
+OnBootSec=2min
+OnCalendar=*:0/15
+# Si la máquina estaba apagada en un disparo, se ejecuta al arrancar
+Persistent=true
+RandomizedDelaySec=30s
+Unit=radio-produce.service
+
+[Install]
+WantedBy=timers.target

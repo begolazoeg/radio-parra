@@ -1,0 +1,155 @@
+"""
+Tests de la simulación acelerada (radio simulate).
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
+import pytest
+from typer.testing import CliRunner
+
+from radio.cli import app
+from radio.core.config import RadioConfig
+from radio.sim import SIM_START, SimReport, run_simulation
+
+REPO = Path(__file__).parents[2]
+
+
+def simulate(hours: float = 24.0, seed: int = 1, start: datetime = SIM_START,
+             **kw: Any) -> SimReport:
+    return run_simulation(
+        hours=hours,
+        seed=seed,
+        config=RadioConfig.load(REPO / "config"),
+        prompts_dir=REPO / "prompts",
+        start=start,
+        **kw,
+    )
+
+
+@pytest.fixture(scope="module")
+def report_24h() -> SimReport:
+    return simulate()
+
+
+def test_24h_seed1_passes_invariants(report_24h: SimReport) -> None:
+    r = report_24h
+    assert r.passed, r.failures
+    assert r.dead_air_s == 0
+    assert r.back_to_back_artist == 0
+    assert r.producer_errors == 0
+    assert r.time_signals_aired >= 23
+    assert r.time_signals_on_time == r.time_signals_aired
+    assert r.max_talk_ratio_rolling_hour <= r.talk_budget_ratio == 0.22
+    assert r.music_share > 0.95          # solo música, jingles y señal horaria
+    assert r.airtime_s["jingle"] > 0 and r.airtime_s["time_signal"] > 0
+    assert r.airtime_s["host_intro"] == 0      # host_intro vuelve en Fase 2
+    assert r.producer_runs >= 47               # cron */30 durante 24 h
+    assert sum(r.airtime_s.values()) >= 24 * 3600
+    assert len(r.decisions_sample) > 0
+    # Sin stock de palabra, los huecos talk bajan al peldaño 3 (cualquier música)
+    assert set(r.rung_histogram) == {"1", "2", "3", "4", "5"}
+    assert r.rung_histogram["3"] > 0 and r.rung_histogram["5"] == 0
+    assert sum(r.rung_histogram.values()) == r.units_aired
+
+
+def test_48h_with_synthetic_talk_stock_has_no_gaps() -> None:
+    """§9 integración: simulate de 48 h con stock sintético termina sin huecos."""
+    r = simulate(hours=48, seed=7, talk_stock=True)
+    assert r.passed, r.failures
+    assert r.dead_air_s == 0 and r.rung_histogram["5"] == 0
+    assert r.time_signals_aired >= 47 and r.time_signals_on_time == r.time_signals_aired
+    assert r.fiction_after_factual == 0
+    assert 0.05 < r.max_talk_ratio_rolling_hour <= r.talk_budget_ratio
+    assert r.airtime_s["host_intro"] > 0
+    assert r.segments_aired > r.units_aired          # hay unidades [host_intro, music]
+    assert sum(r.airtime_s.values()) >= 48 * 3600
+
+
+def test_tinydesk_mode_is_music_only() -> None:
+    r = simulate(hours=3, seed=2, mode="tinydesk", talk_stock=True)
+    assert r.passed, r.failures
+    assert r.mode == "tinydesk"
+    talk = {k: v for k, v in r.airtime_s.items() if k not in ("music", "host_intro")}
+    assert all(v == 0 for v in talk.values()), talk
+    assert r.time_signals_expected_min == 0
+
+
+def test_same_seed_is_deterministic(report_24h: SimReport) -> None:
+    assert simulate().to_dict() == report_24h.to_dict()
+
+
+def test_different_seeds_differ(report_24h: SimReport) -> None:
+    assert simulate(seed=2).to_dict() != report_24h.to_dict()
+
+
+def test_custom_start_and_text_report() -> None:
+    start = datetime(2026, 7, 1, 13, 30, tzinfo=ZoneInfo("Europe/Madrid"))
+    r = simulate(hours=3, seed=5, start=start)
+    assert r.passed, r.failures
+    assert r.start == start.isoformat()
+    text = r.to_text()
+    assert "RESULTADO: OK" in text and "Señales horarias" in text
+
+
+def test_invariant_failure_is_reported() -> None:
+    r = simulate(hours=2)
+    r.dead_air_s = 5.0
+    r.failures.append("silencio en antena: 5 s")
+    assert not r.passed
+    assert "RESULTADO: FALLO" in r.to_text()
+
+
+def test_cli_simulate_json() -> None:
+    result = CliRunner().invoke(
+        app,
+        ["simulate", "--hours", "2", "--seed", "3", "--json",
+         "--config-dir", str(REPO / "config"), "--prompts-dir", str(REPO / "prompts")],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["passed"] is True and data["seed"] == 3
+
+
+def test_tinydesk_catalog_default_mode_keeps_signals_on_time() -> None:
+    """Conciertos de 15–30 min en el modo default: la señal horaria sigue en punto."""
+    r = simulate(hours=24, seed=1, catalog="tinydesk")
+    assert r.passed, r.failures
+    assert r.catalog == "tinydesk"
+    assert r.time_signals_aired >= 23 and r.time_signals_on_time == r.time_signals_aired
+    assert r.interrupts >= 0 and r.music_cuts <= r.interrupts
+    assert r.airtime_s["jingle"] < 0.05 * 24 * 3600      # sin cadenas de jingles de relleno
+
+
+def test_sim_runs_through_the_station_engine(report_24h: SimReport) -> None:
+    """Misma lógica que la emisora: la línea de tiempo sale de los eventos del motor."""
+    assert len(report_24h.timeline) == report_24h.segments_aired
+    assert report_24h.units_aired == sum(
+        v for k, v in report_24h.rung_histogram.items() if k != "5"
+    )
+    assert isinstance(report_24h.interrupts, int) and isinstance(report_24h.music_cuts, int)
+
+
+def test_unknown_catalog_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        simulate(hours=1, catalog="vinilos")  # type: ignore[arg-type]
+    result = CliRunner().invoke(app, ["simulate", "--catalog", "vinilos",
+                                      "--config-dir", str(REPO / "config")])
+    assert result.exit_code == 2
+
+
+def test_cli_simulate_json_with_timeline() -> None:
+    result = CliRunner().invoke(
+        app,
+        ["simulate", "--hours", "1", "--seed", "3", "--json", "--timeline", "--catalog",
+         "tinydesk", "--config-dir", str(REPO / "config"), "--prompts-dir", str(REPO / "prompts")],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["catalog"] == "tinydesk" and data["timeline"]
+    assert {"interrupts", "music_cuts"} <= set(data)
