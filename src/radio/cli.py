@@ -162,3 +162,35 @@ def simulate(
     if not report.passed:
         raise typer.Exit(1)
 
+
+@app.command()
+def station(
+    config_dir: Path = typer.Option(  # noqa: B008
+        Path("config"), "--config-dir", help="Directorio de configuración"
+    ),
+    data_dir: Path = typer.Option(  # noqa: B008
+        Path("data"), "--data-dir", help="Directorio de datos (radio.db, audios generados)"
+    ),
+    prompts_dir: Path = typer.Option(  # noqa: B008
+        Path("prompts"), "--prompts-dir", help="Directorio de plantillas de prompts"
+    ),
+    emergency_dir: Path = typer.Option(  # noqa: B008
+        Path("assets/emergency"), "--emergency-dir", help="Audios de emergencia"
+    ),
+) -> None:
+    """
+    Arranca la emisora real (mpv + reloj del sistema) hasta Ctrl+C / SIGTERM.
+    """
+    import logging  # noqa: PLC0415
+
+    from radio.station import run_station  # noqa: PLC0415
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    run_station(
+        config_dir=config_dir,
+        data_dir=data_dir,
+        prompts_dir=prompts_dir,
+        emergency_dir=emergency_dir,
+    )
