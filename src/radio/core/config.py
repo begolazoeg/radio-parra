@@ -45,6 +45,7 @@ class Cooldowns(BaseModel):
     fiction: int = 30
     time_signal: int = 55
     jingle: int = 10
+    host_intro: int = 12
 
 
 class GridConfig(BaseModel):

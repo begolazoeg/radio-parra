@@ -266,6 +266,8 @@ class Scheduler:
                 return cd.jingle
             case "time_signal":
                 return cd.time_signal
+            case "host_intro":
+                return cd.host_intro
             case _:
                 return 0
 

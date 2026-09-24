@@ -425,3 +425,21 @@ def test_simulation_three_hours(start: datetime, budget: float, seed: int) -> No
             run += r.duration_s
         else:
             run = 0.0
+
+
+def test_host_intro_cooldown_blocks() -> None:
+    """host_intro tiene su propio cooldown (grid.cooldowns_minutes.host_intro)."""
+    now = local(2026, 3, 10, 10, 30)
+    history = [
+        rec("host_intro", now - timedelta(minutes=10), 20),
+        rec("music", now - timedelta(minutes=9), 540),
+    ]
+    for seed in range(30):
+        sched = Scheduler(madrid_grid(), random.Random(seed))
+        assert sched.next_kind(now, history, only("music", "host_intro")) == "music"
+    later = now + timedelta(minutes=3)
+    picks = {
+        Scheduler(madrid_grid(), random.Random(s)).next_kind(later, history, only("music", "host_intro"))
+        for s in range(30)
+    }
+    assert "host_intro" in picks

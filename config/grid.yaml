@@ -10,6 +10,7 @@ cooldowns_minutes:
   fiction: 30
   time_signal: 55
   jingle: 10
+  host_intro: 12
 
 # Señal horaria activada
 time_signal_enabled: true
