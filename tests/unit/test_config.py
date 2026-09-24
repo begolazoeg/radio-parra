@@ -38,13 +38,15 @@ def test_repo_config_loads() -> None:
     st = cfg.station
     assert st.name == "Radio Parra" and st.language == "es"
     assert st.budget.monthly_eur == 10.0
-    assert st.providers["llm"].model == "claude-haiku-4-5-20251001"
+    assert (st.providers["llm"].name, st.providers["llm"].model) == ("claude", "claude-sonnet-5")
+    assert st.providers["tts"].name == "piper"
     assert cfg.data_dir == Path("data")
 
     assert [v.id for v in cfg.voices.voices] == ["locutor_principal"]
     host = cfg.voices.get("locutor_principal")
     assert isinstance(host, Voice)
-    assert (host.role, host.provider, host.consent) == ("host", "cloud", True)
+    assert (host.role, host.provider, host.consent) == ("host", "piper", True)
+    assert host.provider_voice_id == "es_ES-davefx-medium"
     assert cfg.voices.by_role("host") == [host]
 
     prods = cfg.producers.producers

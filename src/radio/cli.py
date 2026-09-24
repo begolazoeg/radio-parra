@@ -8,8 +8,12 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
+
+if TYPE_CHECKING:
+    from radio.core.config import RadioConfig
 
 app = typer.Typer(help="Radio Parra — radio casera con locutor IA")
 
@@ -140,6 +144,9 @@ def doctor(
            msg=f"sin implementar: {', '.join(unknown)}" if unknown
            else "ninguno: no entrará stock nuevo")
 
+    # Proveedores LLM/TTS (solo los usan los productores; sin red)
+    _doctor_providers(config)
+
     # Feed de música (decisión #8)
     tinydesk = config.producers.get("music_tinydesk")
     feed_url = (tinydesk.params.get("feed_url") if tinydesk else None) or ""
@@ -161,6 +168,59 @@ def doctor(
         except httpx.HTTPError as exc:
             _check("feed accesible", False, warn=True,
                    msg=f"{exc} (sin red la emisora sigue sonando desde el stock)")
+
+
+def _doctor_providers(config: RadioConfig) -> None:
+    """
+    Comprobaciones de ``radio doctor`` para los proveedores (§4.1), sin red: solo
+    miran si las credenciales, el binario y los modelos de voz están presentes.
+    """
+    from radio.providers.llm.claude import detect_credentials  # noqa: PLC0415
+    from radio.providers.registry import LLM_PROVIDERS, TTS_PROVIDERS  # noqa: PLC0415
+    from radio.providers.tts.piper import (  # noqa: PLC0415
+        DEFAULT_MODELS_DIR,
+        PIPER_VOICE_PROVIDERS,
+        find_binary,
+        resolve_model,
+    )
+
+    providers = config.station.providers
+    llm = providers.get("llm")
+    llm_name = LLM_PROVIDERS.get(llm.name.lower()) if llm else None
+    if llm is None or llm_name is None:
+        _check("LLM", False, warn=True,
+               msg=f"proveedor desconocido: {llm.name}" if llm else "sin configurar")
+    elif llm_name == "claude":
+        source = detect_credentials()
+        _check(f"LLM claude ({llm.model or 'claude-sonnet-5'}) credenciales", source is not None,
+               warn=True, info=f"{source} presente (sin comprobar en red)",
+               msg="falta ANTHROPIC_API_KEY (o `ant auth login`): no habrá locutor")
+    else:
+        _check(f"LLM {llm_name}", True, info="sin red")
+
+    tts = providers.get("tts")
+    tts_name = TTS_PROVIDERS.get(tts.name.lower()) if tts else None
+    if tts is None or tts_name is None:
+        _check("TTS", False, warn=True,
+               msg=f"proveedor desconocido: {tts.name}" if tts else "sin configurar")
+    elif tts_name == "piper":
+        binary = str(tts.extra.get("binary", "piper"))
+        _check(f"TTS piper ({binary})", find_binary(binary) is not None, warn=True,
+               msg="no está instalado: no habrá voz (ver voices.yaml)")
+        models_dir = Path(tts.extra.get("models_dir", DEFAULT_MODELS_DIR))
+        for entry in config.voices.voices:
+            if entry.provider not in PIPER_VOICE_PROVIDERS:
+                continue
+            model = resolve_model(entry.provider_voice_id, models_dir)
+            ok = model.is_file() and model.with_name(model.name + ".json").is_file()
+            _check(f"voz {entry.id} ({model})", ok, warn=True,
+                   msg="falta el modelo .onnx o su .onnx.json (instálalo a mano, revisa la licencia)")
+    elif tts_name == "cloud":
+        env = str(tts.extra.get("api_key_env", "ELEVENLABS_API_KEY"))
+        _check(f"TTS cloud ({env})", bool(os.environ.get(env, "").strip()), warn=True,
+               info="presente (sin comprobar en red)", msg="falta la clave en el entorno / .env")
+    else:
+        _check(f"TTS {tts_name}", True, info="sin red")
 
 
 @app.command()
