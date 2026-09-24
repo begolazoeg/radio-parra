@@ -1,7 +1,13 @@
 # ADR 0001 — Fase 1: playout, producers entre segmentos y simulación
 
-- Estado: aceptada
+- Estado: aceptada; **sustituida en parte por 0002** (realineación con ARCHITECTURE.md)
 - Fecha: 2026-09-24
+
+> Nota: tras la realineación con ARCHITECTURE.md, la tabla `plays` pasa a ser `play_log`
+> (§3.2), los estados `done`/`error` pasan a `retired`/`quarantined`, la BD es
+> `data/state.db` y el audio va a `data/stock/<kind>/`. El producer `host_intro` descrito
+> aquí se ha retirado hasta la Fase 2 (se rehará con grounding) y los producers se
+> programan por `cron` en lugar de `interval_minutes`. Ver ADR 0002.
 
 ## Contexto
 
