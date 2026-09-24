@@ -5,6 +5,7 @@ Carga los 4 archivos YAML desde config/ sin requerir .env.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -43,31 +44,135 @@ class StationConfig(BaseModel):
     providers: dict[str, ProviderSettings] = Field(default_factory=dict)
 
 
-class TimeSlot(BaseModel):
-    """Franja horaria con configuración de programación."""
-    name: str
-    start: str          # "HH:MM"
-    end: str            # "HH:MM"
-    music_ratio: float = 0.7
-    max_talk_run_min: int = 3
+# ── Parrilla (grid.yaml, §5) ──────────────────────────────────────────────────
+
+# Tipos de hueco permitidos en ``pattern`` (ver radio.grid.scheduler)
+SLOT_KINDS: frozenset[str] = frozenset({"music", "talk", "jingle"})
+
+_HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
-class Cooldowns(BaseModel):
-    """Tiempos mínimos entre segmentos del mismo tipo (minutos)."""
-    factual: int = 15
-    fiction: int = 30
-    time_signal: int = 55
-    jingle: int = 10
-    host_intro: int = 12
+def _check_hhmm(value: str, *, allow_24: bool) -> str:
+    """Valida "HH:MM" (00:00–23:59); ``allow_24`` acepta además "24:00"."""
+    v = value.strip()
+    if allow_24 and v == "24:00":
+        return v
+    if not _HHMM.match(v):
+        raise ValueError(f"hora inválida {value!r}: se espera 'HH:MM'")
+    return v
+
+
+class TalkBudget(BaseModel):
+    """Presupuesto de charla (invariante §1.8): tope de palabra en ventana móvil."""
+    model_config = ConfigDict(extra="forbid")
+
+    window_minutes: int = Field(default=60, gt=0)
+    max_ratio: float = Field(default=0.22, ge=0.0, le=1.0)
+
+
+class InterruptRule(BaseModel):
+    """
+    Regla de interrupción de un modo: emitir ``kind`` cuando se cumpla ``when``
+    (p. ej. ``"minute == 0"``), con un retraso máximo de ``max_late_seconds``.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str = Field(min_length=1)
+    when: str
+    max_late_seconds: float = Field(default=90.0, ge=0.0)
+
+    @field_validator("when")
+    @classmethod
+    def valid_when(cls, v: str) -> str:
+        # Importación diferida: radio.grid importa este módulo
+        from radio.grid.rules import parse_when  # noqa: PLC0415
+
+        parse_when(v)
+        return v
+
+
+class Daypart(BaseModel):
+    """
+    Franja horaria de un modo (hora local, ``from`` incluido, ``to`` excluido).
+    Si ``to`` < ``from`` cruza la medianoche; ``from == to`` o "00:00"–"24:00" = todo el día.
+    """
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    name: str = Field(min_length=1)
+    from_: str = Field(alias="from")
+    to: str
+    pattern: list[str] = Field(min_length=1)
+    talk_pool: dict[str, float] = Field(default_factory=dict)
+
+    @field_validator("from_")
+    @classmethod
+    def valid_from(cls, v: str) -> str:
+        return _check_hhmm(v, allow_24=False)
+
+    @field_validator("to")
+    @classmethod
+    def valid_to(cls, v: str) -> str:
+        return _check_hhmm(v, allow_24=True)
+
+    @field_validator("pattern")
+    @classmethod
+    def valid_pattern(cls, v: list[str]) -> list[str]:
+        unknown = sorted(set(v) - SLOT_KINDS)
+        if unknown:
+            raise ValueError(f"huecos desconocidos en pattern: {unknown} (válidos: {sorted(SLOT_KINDS)})")
+        return v
+
+    @field_validator("talk_pool")
+    @classmethod
+    def valid_pool(cls, v: dict[str, float]) -> dict[str, float]:
+        bad = sorted(k for k, w in v.items() if w < 0)
+        if bad:
+            raise ValueError(f"pesos negativos en talk_pool: {bad}")
+        return v
+
+
+class ModeConfig(BaseModel):
+    """Un modo ("emisora", §4.3): interrupciones y franjas horarias."""
+    model_config = ConfigDict(extra="forbid")
+
+    interrupts: list[InterruptRule] = Field(default_factory=list)
+    dayparts: list[Daypart] = Field(default_factory=list)
+
+
+def _default_modes() -> dict[str, ModeConfig]:
+    """Sin grid.yaml: un único modo ``default`` de solo música todo el día."""
+    return {
+        "default": ModeConfig(
+            dayparts=[Daypart.model_validate(
+                {"name": "todo", "from": "00:00", "to": "24:00", "pattern": ["music"]}
+            )]
+        )
+    }
 
 
 class GridConfig(BaseModel):
-    """Configuración del scheduler de parrilla (grid.yaml)."""
+    """Configuración de la parrilla (grid.yaml, §5). La interpreta ``radio.grid``."""
+    model_config = ConfigDict(extra="forbid")
+
     timezone: str = "Europe/Madrid"
-    talk_budget_ratio: float = 0.3
-    cooldowns_minutes: Cooldowns = Cooldowns()
-    slots: list[TimeSlot] = Field(default_factory=list)
-    time_signal_enabled: bool = True
+    talk_budget: TalkBudget = TalkBudget()
+    cooldowns_minutes: dict[str, float] = Field(default_factory=dict)
+    modes: dict[str, ModeConfig] = Field(default_factory=_default_modes)
+
+    @field_validator("cooldowns_minutes")
+    @classmethod
+    def valid_cooldowns(cls, v: dict[str, float]) -> dict[str, float]:
+        bad = sorted(k for k, m in v.items() if m < 0)
+        if bad:
+            raise ValueError(f"cooldowns negativos: {bad}")
+        return v
+
+    @field_validator("modes")
+    @classmethod
+    def modes_not_empty(cls, v: dict[str, ModeConfig]) -> dict[str, ModeConfig]:
+        if not v:
+            raise ValueError("grid.yaml necesita al menos un modo")
+        return v
 
 
 class VoiceEntry(BaseModel):

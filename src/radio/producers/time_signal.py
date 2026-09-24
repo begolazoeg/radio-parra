@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from radio.core.models import SegmentKind, SourceDoc, StockView
-from radio.core.scheduler import TIME_SIGNAL_WINDOW_MIN
+from radio.grid.rules import TIME_SIGNAL_WINDOW_MIN
 from radio.producers.base import Draft, ProducerContext, StagedProducer, pick_voice
 
 # Número de horas futuras con señal preparada si producers.yaml no dice otra cosa

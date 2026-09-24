@@ -2,7 +2,7 @@
 Bucle real de la emisora (``radio station``).
 
 Monta las piezas de producción —``SystemClock`` en la zona de la emisora, BD en
-``data/state.db``, ``MpvAudioBackend``, ``Scheduler`` con la parrilla y un
+``data/state.db``, ``MpvAudioBackend``, el ``Playout`` con la parrilla (``radio.grid``) y un
 ``ProducerRunner`` con los producers de producers.yaml— y emite sin parar.
 
 Decisiones de Fase 1
@@ -31,7 +31,6 @@ from radio.core.clock import Clock, SystemClock
 from radio.core.config import RadioConfig
 from radio.core.paths import db_path
 from radio.core.playout import Playout
-from radio.core.scheduler import Scheduler
 from radio.core.store import DB
 from radio.producers import (
     Producer,
@@ -119,7 +118,7 @@ def run_station(
     clock = SystemClock(tz)
     playout = Playout(
         db,
-        Scheduler(config.grid),
+        config.grid,
         MpvAudioBackend(),
         clock,
         tz=tz,

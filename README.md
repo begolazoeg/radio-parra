@@ -71,17 +71,22 @@ uv run radio station                        # emisora real (mpv); Ctrl+C para pa
 
 Qué hay:
 
-- **Scheduler de parrilla** (`core/scheduler.py`): decide el *tipo* de lo siguiente
-  según franjas, presupuesto de palabra en hora móvil, rachas, cooldowns y señal horaria.
-- **Playout** (`core/playout.py`): elige el segmento concreto (señal de la hora en
-  curso, sin repetir artista, sin pisar la señal de la próxima hora), lo emite, lo
-  registra en `play_log` y actualiza su estado. Audio de emergencia si no hay nada.
+- **Parrilla** (`grid/`, §4.3): `next_unit(state, stock, now, mode, rng)` es una
+  función pura que devuelve la próxima `PlayUnit` (p. ej. `[host_intro, music]`):
+  interrupciones (`when: "minute == 0"`, `max_late_seconds`), franjas y patrón cíclico
+  por modo, presupuesto de charla (22 % en 60 min), cooldowns, nunca ficción justo tras
+  factual y escalera de degradación de §8 (peldaño 5 = emergencia). Config en
+  `config/grid.yaml` (modos `default` y `tinydesk`).
+- **Playout** (`core/playout.py`): emite cada unidad segmento a segmento, la registra
+  en `play_log`, retira la palabra emitida y pone en cuarentena audios ausentes.
+  Audio de emergencia en el peldaño 5.
 - **Producers** (`producers/`): señal horaria, ejecutada por `ProducerRunner` entre
   segmento y segmento. La locutora (`host_intro`) se rehace en Fase 2 con grounding.
 - **Proveedores** (`providers/registry.py`): solo `fake` por ahora.
 - **Simulación** (`sim.py`): invariantes duros — cero silencio, nunca dos canciones
-  seguidas del mismo artista, al menos `horas - 1` señales horarias y ningún producer
-  con error. CI ejecuta `radio simulate --hours 6 --seed 1`.
+  seguidas del mismo artista, al menos `horas - 1` señales horarias a tiempo, charla
+  bajo el tope, nunca ficción tras factual, ningún peldaño 5 y ningún producer con
+  error. El informe incluye el histograma de peldaños de la escalera. CI ejecuta `radio simulate --hours 6 --seed 1`.
 
 Pendiente: producers factual/ficción, proveedores reales de LLM/TTS y sacar los
 producers del bucle de la emisora. Decisiones en `docs/decisions/`.

@@ -16,9 +16,17 @@ que está en una simulación. Si un paso no emite nada, el bucle avanza el reloj
 Determinismo: todo el azar sale de ``random.Random(seed)`` (catálogo y scheduler) y
 el informe no incluye ids ni rutas; misma semilla → informe idéntico.
 
+El ``Playout`` decide con ``radio.grid.next_unit`` y emite cada unidad segmento a
+segmento. Con ``talk_stock=True`` se añade además stock sintético de palabra (un
+lote por cada kind de los ``talk_pool`` de la parrilla, factual o ficción según
+``FACTUAL_TALK_KINDS``) e intros ``host_intro`` vinculadas a parte de las canciones,
+para ejercitar presupuesto de charla, cooldowns, vinculación y §1.4.
+
 Invariantes duros (``SimReport.failures``): sin silencio, sin artista repetido en
-canciones consecutivas, al menos ``horas - 1`` señales horarias y ningún producer
-con error.
+canciones consecutivas, al menos ``horas - 1`` señales horarias (todas dentro de su
+``max_late_seconds``), la charla nunca por encima de ``talk_budget.max_ratio`` en
+ninguna ventana móvil, nunca ficción justo después de factual, ningún peldaño 5 y
+ningún producer con error.
 """
 
 from __future__ import annotations
@@ -26,19 +34,22 @@ from __future__ import annotations
 import json
 import random
 import tempfile
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from radio.core.clock import FakeClock
-from radio.core.config import ProducersConfig, ProducerSettings, RadioConfig
+from radio.core.config import GridConfig, ProducersConfig, ProducerSettings, RadioConfig
 from radio.core.models import Segment
-from radio.core.playout import ARTIST_PREFIX, Playout, PlayOutcome
-from radio.core.scheduler import ALL_KINDS, BUDGET_WINDOW, TALK_KINDS, Scheduler
+from radio.core.playout import Playout, PlayOutcome
 from radio.core.store import DB
+from radio.grid.budget import is_talk
+from radio.grid.rules import resolve_mode
+from radio.grid.scheduler import ARTIST_PREFIX, RUNG_EMERGENCY, SEPARATOR_KINDS
 from radio.producers import ProducerContext, ProducerRunner, TimeSignalProducer
 from radio.providers.llm.fake import FakeLLM
 from radio.providers.tts.fake import FakeTTS
@@ -53,6 +64,19 @@ N_JINGLES = 3
 JINGLE_DURATION_S = (6.0, 10.0)
 DEAD_AIR_STEP_S = 5.0
 DECISIONS_SAMPLE = 12
+
+# Stock sintético de palabra (``talk_stock=True``)
+N_TALK_PER_KIND = 40
+TALK_DURATION_S = (45.0, 90.0)
+INTRO_EVERY_N_TRACKS = 3
+INTRO_DURATION_S = (10.0, 25.0)
+FACTUAL_TALK_KINDS: frozenset[str] = frozenset({
+    "weather", "ephemeris", "sky", "word_of_day", "artist_fact", "news", "agenda",
+    "birthday", "dedication", "voicemail", "serial_classic", "parra_report", "trivia",
+})
+
+# Kinds que siempre aparecen en el informe de tiempo de antena
+REPORT_KINDS: tuple[str, ...] = ("music", "host_intro", "jingle", "time_signal")
 
 # Producers activos en la simulación (no se toca producers.yaml)
 SIM_PRODUCERS: dict[str, ProducerSettings] = {
@@ -90,6 +114,7 @@ class Decision:
     kind: str
     title: str
     reason: str
+    rung: int = 1
 
 
 @dataclass
@@ -97,18 +122,22 @@ class SimReport:
     """Resultado de una simulación (texto legible o JSON)."""
     seed: int
     hours: float
+    mode: str
     start: str
     end: str
     segments_aired: int
+    units_aired: int
     airtime_s: dict[str, float]
     airtime_pct: dict[str, float]
     music_share: float
     max_talk_ratio_rolling_hour: float
     talk_budget_ratio: float
     time_signals_aired: int
-    time_signals_on_time: int          # emitidas en los minutos 0–4 de la hora
+    time_signals_on_time: int          # dentro de max_late_seconds tras la hora en punto
     time_signals_expected_min: int     # horas - 1 (la primera hora no tiene señal previa)
     back_to_back_artist: int
+    fiction_after_factual: int
+    rung_histogram: dict[str, int]     # peldaño de la escalera (§8) → unidades
     dead_air_s: float
     producer_runs: int
     producer_errors: int
@@ -129,9 +158,9 @@ class SimReport:
 
     def to_text(self) -> str:
         lines = [
-            f"Simulación Radio Parra — {self.hours:g} h, semilla {self.seed}",
+            f"Simulación Radio Parra — {self.hours:g} h, semilla {self.seed}, modo {self.mode}",
             f"  Desde {self.start} hasta {self.end}",
-            f"  Segmentos emitidos: {self.segments_aired}",
+            f"  Unidades emitidas: {self.units_aired} ({self.segments_aired} segmentos)",
             "",
             "Tiempo de antena por tipo:",
         ]
@@ -140,19 +169,22 @@ class SimReport:
         lines += [
             "",
             f"Música: {self.music_share * 100:.1f} % del tiempo de antena",
-            f"Palabra máx. en hora móvil: {self.max_talk_ratio_rolling_hour * 100:.1f} % "
-            f"(presupuesto {self.talk_budget_ratio * 100:.0f} %)",
+            f"Palabra máx. en ventana móvil: {self.max_talk_ratio_rolling_hour * 100:.1f} % "
+            f"(tope {self.talk_budget_ratio * 100:.0f} %)",
             f"Señales horarias: {self.time_signals_aired} emitidas "
-            f"({self.time_signals_on_time} en minuto 0–4; mínimo esperado "
+            f"({self.time_signals_on_time} a tiempo; mínimo esperado "
             f"{self.time_signals_expected_min})",
             f"Mismo artista seguido: {self.back_to_back_artist}",
+            f"Ficción justo después de factual: {self.fiction_after_factual}",
+            "Escalera de degradación (peldaño: unidades): "
+            + ", ".join(f"{k}: {v}" for k, v in self.rung_histogram.items()),
             f"Silencio: {self.dead_air_s:.0f} s",
             f"Producers: {self.producer_runs} ejecuciones, {self.producer_errors} con error",
             "",
             "Muestra de decisiones del scheduler:",
         ]
         for d in self.decisions_sample:
-            lines.append(f"  {d.at} {d.kind:<11} {d.title} — {d.reason}")
+            lines.append(f"  {d.at} [{d.rung}] {d.kind:<11} {d.title} — {d.reason}")
         lines.append("")
         if self.passed:
             lines.append("RESULTADO: OK (todos los invariantes se cumplen)")
@@ -183,7 +215,7 @@ def build_catalog(db: DB, rng: random.Random, created_at: datetime) -> None:
                 factual=False,
                 path=Path(f"/sim/music/{seg_id}.mp3"),
                 duration_s=round(duration, 3),
-                # created_at distinto por pista: fija el orden de la primera rotación
+                # created_at distinto por pista: orden estable
                 created_at=created_at + timedelta(microseconds=order),
                 producer="sim",
                 meta={
@@ -207,6 +239,48 @@ def build_catalog(db: DB, rng: random.Random, created_at: datetime) -> None:
         )
 
 
+def talk_kinds(grid: GridConfig) -> list[str]:
+    """Kinds de palabra que aparecen en algún ``talk_pool`` (orden estable)."""
+    return sorted({
+        kind
+        for mode in grid.modes.values()
+        for part in mode.dayparts
+        for kind, weight in part.talk_pool.items()
+        if weight > 0
+    })
+
+
+def build_talk_stock(db: DB, rng: random.Random, created_at: datetime, grid: GridConfig) -> None:
+    """Stock sintético de palabra e intros vinculadas (ver docstring del módulo)."""
+    for kind in talk_kinds(grid):
+        for i in range(N_TALK_PER_KIND):
+            seg_id = f"sim-{kind}-{i:03d}"
+            db.add_segment(Segment(
+                id=seg_id,
+                kind=kind,
+                factual=kind in FACTUAL_TALK_KINDS,
+                path=Path(f"/sim/{kind}/{seg_id}.mp3"),
+                duration_s=round(rng.uniform(*TALK_DURATION_S), 3),
+                created_at=created_at + timedelta(microseconds=i),
+                producer="sim",
+                meta={"title": f"{kind} {i + 1}"},
+            ))
+    music = sorted(db.list_segments(kind="music"), key=lambda s: s.id)
+    for i, track in enumerate(music[::INTRO_EVERY_N_TRACKS]):
+        seg_id = f"sim-intro-{i:03d}"
+        db.add_segment(Segment(
+            id=seg_id,
+            kind="host_intro",
+            factual=True,
+            path=Path(f"/sim/host_intro/{seg_id}.mp3"),
+            duration_s=round(rng.uniform(*INTRO_DURATION_S), 3),
+            created_at=created_at,
+            producer="sim",
+            parent_id=track.id,
+            meta={"title": f"Intro de {track.title}"},
+        ))
+
+
 # ── Métricas ──────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -217,12 +291,14 @@ class _Aired:
     segment_id: str
 
 
-def _max_rolling_talk_ratio(aired: Sequence[_Aired], origin: datetime) -> float:
-    """Máxima proporción de palabra en ventanas de 60 min que acaban al final de cada segmento."""
+def _max_rolling_talk_ratio(
+    aired: Sequence[_Aired], origin: datetime, window: timedelta
+) -> float:
+    """Máxima proporción de palabra en ventanas que acaban al final de cada segmento."""
     best = 0.0
     for item in aired:
         window_end = item.end
-        window_start = window_end - BUDGET_WINDOW
+        window_start = window_end - window
         if window_start < origin:
             continue
         talk = total = 0.0
@@ -231,7 +307,7 @@ def _max_rolling_talk_ratio(aired: Sequence[_Aired], origin: datetime) -> float:
             if clipped <= 0:
                 continue
             total += clipped
-            if rec.kind in TALK_KINDS:
+            if is_talk(rec.kind):
                 talk += clipped
         if total > 0:
             best = max(best, talk / total)
@@ -253,6 +329,28 @@ def _back_to_back_artists(db: DB, aired: Sequence[_Aired]) -> int:
     return count
 
 
+def _fiction_after_factual(db: DB, aired: Sequence[_Aired]) -> int:
+    """Segmentos de ficción emitidos justo después de uno factual (§1.4)."""
+    count = 0
+    prev_factual = False
+    for item in aired:
+        seg = db.get_segment(item.segment_id)
+        if item.kind in SEPARATOR_KINDS or seg is None:
+            prev_factual = False
+            continue
+        if prev_factual and not seg.factual:
+            count += 1
+        prev_factual = seg.factual
+    return count
+
+
+def _signal_delay_s(start: datetime, tz: ZoneInfo) -> float:
+    """Segundos desde la hora en punto (local) hasta ``start``."""
+    local = start.astimezone(tz)
+    top = local.replace(minute=0, second=0, microsecond=0)
+    return (start.astimezone(UTC) - top.astimezone(UTC)).total_seconds()
+
+
 # ── Simulación ────────────────────────────────────────────────────────────────
 
 def sim_config(config: RadioConfig) -> RadioConfig:
@@ -267,6 +365,8 @@ def run_simulation(
     config: RadioConfig,
     prompts_dir: Path = Path("prompts"),
     start: datetime = SIM_START,
+    mode: str = "default",
+    talk_stock: bool = False,
 ) -> SimReport:
     """Ejecuta la simulación y devuelve el informe (no lanza por invariantes)."""
     if start.tzinfo is None:
@@ -275,16 +375,21 @@ def run_simulation(
     tz = ZoneInfo(config.station.timezone)
 
     db = DB(":memory:")
-    clock = FakeClock(start)
-    build_catalog(db, random.Random(seed), start)
-    scheduler = Scheduler(config.grid, rng=random.Random(seed))
+    # El reloj avanza en UTC: sumar segundos a una hora local es aritmética de pared
+    # y se descuadra en los cambios de hora
+    clock = FakeClock(start.astimezone(UTC))
+    catalog_rng = random.Random(seed)
+    build_catalog(db, catalog_rng, start)
+    if talk_stock:
+        build_talk_stock(db, catalog_rng, start, config.grid)
 
     def duration_of(path: Path) -> float:
         seg = db.find_by_path(path)
         return seg.duration_s if seg else 0.0
 
-    end = start + timedelta(hours=hours)
+    end = start.astimezone(UTC) + timedelta(hours=hours)
     outcomes: list[PlayOutcome] = []
+    rungs: Counter[int] = Counter()
     dead_air = 0.0
     try:
         with tempfile.TemporaryDirectory(prefix="radio-sim-") as tmp:
@@ -300,24 +405,28 @@ def run_simulation(
             runner = ProducerRunner(ctx, [TimeSignalProducer()])
             playout = Playout(
                 db,
-                scheduler,
+                config.grid,
                 SimAudioBackend(clock, duration_of),
                 clock,
                 tz=config.station.timezone,
+                mode=mode,
+                rng=random.Random(seed),
                 verify_files=False,
             )
             while clock.now() < end:
                 runner.tick()
                 outcome = playout.step()
                 if outcome is None:
+                    rungs[RUNG_EMERGENCY] += 1
                     clock.advance(DEAD_AIR_STEP_S)
                     dead_air += DEAD_AIR_STEP_S
                 else:
+                    rungs[outcome.rung] += 1
                     outcomes.append(outcome)
 
         return _build_report(
-            db, config, tz, seed=seed, hours=hours, start=start, end=clock.now(),
-            outcomes=outcomes, dead_air=dead_air,
+            db, config, tz, seed=seed, hours=hours, mode=mode, start=start, end=clock.now().astimezone(tz),
+            outcomes=outcomes, rungs=rungs, dead_air=dead_air,
         )
     finally:
         db.close()
@@ -330,63 +439,90 @@ def _build_report(
     *,
     seed: int,
     hours: float,
+    mode: str,
     start: datetime,
     end: datetime,
     outcomes: Sequence[PlayOutcome],
+    rungs: Counter[int],
     dead_air: float,
 ) -> SimReport:
+    grid = config.grid
     aired = [
         _Aired(kind=p.kind, start=p.started_at, end=p.ended_at, segment_id=p.segment_id)
         for p in db.list_play_log()
         if p.ended_at is not None and p.segment_id is not None
     ]
-    airtime: dict[str, float] = {k: 0.0 for k in ALL_KINDS}
+    airtime: dict[str, float] = {k: 0.0 for k in REPORT_KINDS}
     for item in aired:
         airtime[item.kind] = airtime.get(item.kind, 0.0) + (item.end - item.start).total_seconds()
     total = sum(airtime.values()) or 1.0
     airtime_pct = {k: round(v / total * 100, 2) for k, v in airtime.items()}
 
+    _, mode_cfg = resolve_mode(grid, mode)
+    signal_rules = [r for r in mode_cfg.interrupts if r.kind == "time_signal"]
+    max_late = max((r.max_late_seconds for r in signal_rules), default=0.0)
     signals = [a for a in aired if a.kind == "time_signal"]
-    on_time = sum(1 for a in signals if a.start.astimezone(tz).minute < 5)
-    expected = max(0, int(hours) - 1)
+    on_time = sum(1 for a in signals if _signal_delay_s(a.start, tz) <= max_late)
+    expected = max(0, int(hours) - 1) if signal_rules else 0
     back_to_back = _back_to_back_artists(db, aired)
+    fiction_after = _fiction_after_factual(db, aired)
+    window = timedelta(minutes=grid.talk_budget.window_minutes)
+    max_ratio = _max_rolling_talk_ratio(aired, start, window)
     runs = db.list_producer_runs()
     errors = sum(1 for r in runs if r.ok is False)
 
     failures: list[str] = []
     if dead_air > 0:
         failures.append(f"silencio en antena: {dead_air:.0f} s")
+    if rungs.get(RUNG_EMERGENCY, 0) > 0:
+        failures.append(f"bucle de emergencia (peldaño 5): {rungs[RUNG_EMERGENCY]} veces")
     if back_to_back > 0:
         failures.append(f"mismo artista en canciones consecutivas: {back_to_back}")
     if len(signals) < expected:
         failures.append(f"señales horarias insuficientes: {len(signals)} < {expected}")
+    if on_time < len(signals):
+        failures.append(
+            f"señales horarias tarde (> {max_late:.0f} s): {len(signals) - on_time}"
+        )
+    if max_ratio > grid.talk_budget.max_ratio + 1e-9:
+        failures.append(
+            f"presupuesto de charla superado: {max_ratio:.3f} > {grid.talk_budget.max_ratio}"
+        )
+    if fiction_after > 0:
+        failures.append(f"ficción justo después de factual: {fiction_after}")
     if errors > 0:
         failures.append(f"producers con error: {errors}")
 
     sample = [
         Decision(
-            at=o.started_at.astimezone(tz).strftime("%H:%M:%S"),
-            kind=o.kind,
-            title=o.title,
+            at=a.started_at.astimezone(tz).strftime("%H:%M:%S"),
+            kind=a.kind,
+            title=a.title,
             reason=o.reason,
+            rung=o.rung,
         )
-        for o in outcomes[:DECISIONS_SAMPLE]
-    ]
+        for o in outcomes
+        for a in o.aired
+    ][:DECISIONS_SAMPLE]
     return SimReport(
         seed=seed,
         hours=hours,
+        mode=mode,
         start=start.isoformat(),
         end=end.isoformat(),
         segments_aired=len(aired),
+        units_aired=len(outcomes),
         airtime_s={k: round(v, 2) for k, v in airtime.items()},
         airtime_pct=airtime_pct,
         music_share=round(airtime["music"] / total, 4),
-        max_talk_ratio_rolling_hour=round(_max_rolling_talk_ratio(aired, start), 4),
-        talk_budget_ratio=config.grid.talk_budget_ratio,
+        max_talk_ratio_rolling_hour=round(max_ratio, 4),
+        talk_budget_ratio=grid.talk_budget.max_ratio,
         time_signals_aired=len(signals),
         time_signals_on_time=on_time,
         time_signals_expected_min=expected,
         back_to_back_artist=back_to_back,
+        fiction_after_factual=fiction_after,
+        rung_histogram={str(r): rungs.get(r, 0) for r in range(1, RUNG_EMERGENCY + 1)},
         dead_air_s=dead_air,
         producer_runs=len(runs),
         producer_errors=errors,
