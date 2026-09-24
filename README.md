@@ -101,9 +101,11 @@ producers del bucle de la emisora. Decisiones en `docs/decisions/`.
   `station.loudness_lufs`) + recorte de silencios; sin ffmpeg, se avisa y no se toca.
 - **Registro** (`producers/registry.py`): `PRODUCERS` = nombre → fábrica.
 - **`music_tinydesk`**: lee el feed RSS oficial de `producers.yaml →
-  music_tinydesk.params.feed_url`. **La URL es la decisión abierta #8 y no tiene valor
-  por defecto**: hasta que la dueña la configure, el productor falla con
-  "feed_url no configurado (decisión abierta #8)". Solo episodios con enclosure de
+  music_tinydesk.params.feed_url`: el feed oficial "Tiny Desk Concerts - Audio" de NPR,
+  `https://feeds.npr.org/510306/podcast.xml` (decisión #8, resuelta). **Términos de NPR:
+  uso personal y no comercial, sin modificar el contenido (`loudnorm: false`) y sin
+  usarlo para construir o entrenar sistemas de IA.** Sin `feed_url` el productor falla
+  con "feed_url no configurado (decisión abierta #8)". Solo episodios con enclosure de
   audio, deduplicados por `guid`, del más reciente al más antiguo, descargas
   secuenciales con `User-Agent` propio y GET condicional (ETag/Last-Modified guardados
   en `data/cache/feeds/`). Tope de caché LRU (`max_cache_items` / `max_cache_mb`):

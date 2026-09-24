@@ -555,6 +555,9 @@ Cada fase termina en una rama/PR con **criterios de aceptación** verificables.
 6. **Fuentes de noticias** concretas (2-3 medios con RSS).
 7. **Calendario y datos personales:** qué se conecta y qué queda fuera de la radio.
 8. **Feed exacto de Tiny Desk** en audio (verificar URL y términos de uso en el momento de implementarlo).
+   → *Resuelta (2026-09-24):* `https://feeds.npr.org/510306/podcast.xml` ("Tiny Desk Concerts - Audio").
+   Términos de NPR: uso personal y no comercial, sin modificar el contenido, sin usarlo para construir o
+   entrenar sistemas de IA. Pendiente de revisar antes de la Fase 2 (descripciones del episodio como fuente del LLM).
 9. **Deporte inventado** y su bible de reglas (para `liga`).
 
 ---

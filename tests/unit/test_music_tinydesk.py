@@ -261,9 +261,12 @@ def test_missing_feed_url_fails_clearly(tmp_path: Path, server: FakeServer) -> N
     assert server.requests == []
 
 
-def test_repo_config_has_no_feed_url() -> None:
+def test_repo_config_uses_official_npr_feed() -> None:
+    """Decisión #8: solo el feed RSS oficial de audio de NPR (§7), sin recodificar."""
     settings = RadioConfig.load(REPO / "config").producers.get("music_tinydesk")
-    assert settings is not None and not settings.params.get("feed_url")
+    assert settings is not None and settings.active
+    assert settings.params["feed_url"] == "https://feeds.npr.org/510306/podcast.xml"
+    assert settings.params["loudnorm"] is False  # términos de NPR: no modificar el contenido
 
 
 @pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ReadTimeout])

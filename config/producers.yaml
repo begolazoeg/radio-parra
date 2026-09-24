@@ -13,14 +13,15 @@ producers:
     params: {}
 
   music_tinydesk:
-    active: false
+    active: true
     target_stock: 30         # episodios `ready` que se quieren tener
     cron: "0 */6 * * *"      # busca episodios nuevos aunque el stock esté lleno
     params:
-      # Decisión abierta #8: URL del feed RSS oficial de audio. La aporta la dueña
-      # tras verificar la URL y los términos de uso. Sin ella el productor falla
-      # con "feed_url no configurado (decisión abierta #8)".
-      feed_url: null
+      # Decisión #8 (resuelta 2026-09-24): feed oficial "Tiny Desk Concerts - Audio"
+      # de NPR (podcast 510306). Términos de uso de NPR: podcasts solo para uso
+      # personal y no comercial; sin modificar el contenido (por eso loudnorm: false);
+      # no usar el contenido para construir o entrenar sistemas de IA. Ver ADR 0002.
+      feed_url: "https://feeds.npr.org/510306/podcast.xml"
       max_cache_items: 60    # tope de episodios descargados (LRU); >= target_stock
       max_cache_mb: null     # tope en MB (null = sin tope)
       max_per_run: 5         # descargas como mucho por ejecución (el resto, en la siguiente)
