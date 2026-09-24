@@ -99,3 +99,32 @@ def stock() -> None:
             status_counts[status] = status_counts.get(status, 0) + 1
         for status, count in sorted(status_counts.items()):
             typer.echo(f"  {status}: {count}")
+
+
+@app.command("import-music")
+def import_music(
+    directory: Path = typer.Argument(  # noqa: B008
+        ..., exists=True, file_okay=False, dir_okay=True, help="Directorio con audios"
+    ),
+    db_path: Path = typer.Option(  # noqa: B008
+        Path("data") / "radio.db", "--db", help="Ruta de la base de datos SQLite"
+    ),
+) -> None:
+    """
+    Importa una biblioteca musical local (recursiva) como segmentos 'music' listos.
+    """
+    from radio.core.store import DB  # noqa: PLC0415
+    from radio.music.library import import_directory  # noqa: PLC0415
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db = DB(db_path)
+    try:
+        report = import_directory(db, directory)
+    finally:
+        db.close()
+
+    typer.echo(f"Añadidas: {report.added}")
+    typer.echo(f"Ya existentes: {report.skipped_existing}")
+    typer.echo(f"Fallidas: {len(report.failed)}")
+    for failed in report.failed:
+        typer.echo(f"  - {failed}")
