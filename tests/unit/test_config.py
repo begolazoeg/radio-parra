@@ -53,7 +53,8 @@ def test_repo_config_loads() -> None:
     assert (ts.active, ts.target_stock, ts.cron) == (True, 2, "*/30 * * * *")
     td = prods["music_tinydesk"]
     assert (td.active, td.target_stock, td.cron) == (False, 30, "0 */6 * * *")
-    assert td.params == {"feed_url": None, "max_cache_items": 60}
+    assert td.params["feed_url"] is None          # decisión abierta #8: sin URL por defecto
+    assert td.params["max_cache_items"] == 60
     assert cfg.producers.get("nope") is None
 
 

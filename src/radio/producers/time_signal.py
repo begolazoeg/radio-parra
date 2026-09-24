@@ -1,25 +1,24 @@
 """
-Producer de señal horaria.
+Productor de señal horaria (``time_signal``).
 
-Mantiene un pequeño stock de locuciones "Son las X en punto" para las
-próximas horas en punto (hora local de la emisora). No usa LLM, solo TTS.
+Mantiene un pequeño stock de locuciones "Son las X en punto" para las próximas
+horas en punto (hora local de la emisora). No usa LLM, solo TTS.
 
-- Número de horas preparadas: ``target_stock`` de producers.yaml (por defecto 2).
+- Horas preparadas: ``target_stock`` de producers.yaml (por defecto 2).
+- ``deficit``: cuántas de esas próximas horas no tienen señal emitible en el stock.
 - Cada señal es factual (la fuente es el reloj), con prioridad alta (1, §14) y
-  caduca ``SIGNAL_WINDOW`` después de su hora en punto: pasada la ventana ya no
-  tiene sentido emitirla. Las caducadas se marcan ``expired`` en cada ejecución.
+  caduca ``SIGNAL_WINDOW`` después de su hora en punto. Las caducadas se marcan
+  ``expired`` al empezar cada ejecución (``prepare``).
 - Se identifica por la etiqueta ``hour:YYYY-MM-DDTHH`` en ``meta["tags"]``.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo
 
-from radio.core.ids import new_id
-from radio.core.models import Segment, SegmentKind
+from radio.core.models import SegmentKind, SourceDoc, StockView
 from radio.core.scheduler import TIME_SIGNAL_WINDOW_MIN
-from radio.producers.base import ProducerContext, pick_voice, write_segment_audio
+from radio.producers.base import Draft, ProducerContext, StagedProducer, pick_voice
 
 # Número de horas futuras con señal preparada si producers.yaml no dice otra cosa
 HOURS_AHEAD = 2
@@ -61,22 +60,39 @@ def hour_tag(dt: datetime) -> str:
     return TAG_PREFIX + dt.strftime(_TAG_FORMAT)
 
 
-class TimeSignalProducer:
+class TimeSignalProducer(StagedProducer):
     """Genera las señales horarias de las próximas horas."""
     name = "time_signal"
     kind: SegmentKind = "time_signal"
     factual = True
+    default_target_stock = HOURS_AHEAD
 
-    def run(self, ctx: ProducerContext) -> list[str]:
-        tz = ZoneInfo(ctx.config.station.timezone)
-        created_at = ctx.clock.now()
-        now = created_at.astimezone(tz)
+    def upcoming_slots(self, now: datetime) -> list[datetime]:
+        """Las próximas ``target_stock`` horas en punto (hora local)."""
+        # Aritmética en UTC para respetar los cambios de horario
+        base = now.astimezone(self.tz).replace(minute=0, second=0, microsecond=0)
+        base_utc = base.astimezone(UTC)
+        return [
+            (base_utc + timedelta(hours=i)).astimezone(self.tz)
+            for i in range(1, self.target_stock + 1)
+        ]
 
-        # 1) Caducar señales cuya ventana ya pasó
+    def deficit(self, stock: StockView, now: datetime) -> int:
+        have = {t for seg in stock.get(self.kind) for t in seg.tags}
+        return sum(1 for slot in self.upcoming_slots(now) if hour_tag(slot) not in have)
+
+    def prepare(self, ctx: ProducerContext, now: datetime) -> None:
+        """Caduca las señales cuya ventana ya pasó."""
         ctx.db.expire_segments(now, kind=self.kind)
 
-        # 2) Crear las que falten para las próximas horas en punto
-        #    (una en cuarentena, p. ej. por audio perdido, se vuelve a generar)
+    def gather(self, ctx: ProducerContext, wanted: int) -> list[Draft]:
+        """
+        Un borrador por hora sin señal. Una en cuarentena (p. ej. audio perdido) se
+        vuelve a generar; cualquier otro estado cuenta como existente.
+        """
+        if wanted <= 0:
+            return []
+        now = ctx.clock.now()
         have = {
             tag
             for seg in ctx.db.list_segments(kind=self.kind)
@@ -84,43 +100,22 @@ class TimeSignalProducer:
             for tag in seg.tags
             if tag.startswith(TAG_PREFIX)
         }
-        settings = ctx.config.producers.get(self.name)
-        hours_ahead = settings.target_stock if settings and settings.target_stock else HOURS_AHEAD
         voice = pick_voice(ctx.config, VOICE_ID)
-        station_name = ctx.config.station.name
-        base = now.replace(minute=0, second=0, microsecond=0).astimezone(UTC)
-        created: list[str] = []
-        for i in range(1, hours_ahead + 1):
-            # Aritmética en UTC para respetar los cambios de horario
-            slot = (base + timedelta(hours=i)).astimezone(tz)
+        drafts: list[Draft] = []
+        for slot in self.upcoming_slots(now):
             tag = hour_tag(slot)
             if tag in have:
                 continue
-            text = time_signal_text(slot.hour, station_name)
-            seg_id = new_id()
-            audio = write_segment_audio(
-                ctx, kind=self.kind, seg_id=seg_id, text=text, voice=voice
-            )
-            ctx.db.add_segment(
-                Segment(
-                    id=seg_id,
-                    kind=self.kind,
-                    factual=self.factual,
-                    path=audio.path,
-                    duration_s=audio.duration_s,
-                    created_at=created_at,
-                    producer=self.name,
-                    expires_at=slot + SIGNAL_WINDOW,
-                    priority=PRIORITY,
-                    voice_id=voice.id,
-                    meta={
-                        "title": f"Señal horaria {slot:%H}:00",
-                        "tags": [tag],
-                        "script": text,
-                        "sources": [{"id": "reloj", "text": slot.isoformat(), "url": ""}],
-                    },
-                )
-            )
-            have.add(tag)
-            created.append(seg_id)
-        return created
+            drafts.append(Draft(
+                sources=[SourceDoc(id="reloj", text=slot.isoformat(), url="")],
+                voice=voice,
+                expires_at=slot + SIGNAL_WINDOW,
+                priority=PRIORITY,
+                meta={"title": f"Señal horaria {slot:%H}:00", "tags": [tag], "hour": slot.hour},
+            ))
+        return drafts
+
+    def write(self, ctx: ProducerContext, draft: Draft) -> Draft:
+        """Plantilla fija: la hora sale del reloj, no de un LLM."""
+        draft.script = time_signal_text(int(draft.meta.pop("hour")), ctx.config.station.name)
+        return draft
