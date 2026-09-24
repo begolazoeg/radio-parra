@@ -30,6 +30,15 @@ providers:
 audio:
   mpv_bin: "mpv"
   mpv_args: []               # p. ej. ["--audio-device=alsa/plughw:CARD=sndrpihifiberry"]
+  # Normalización en reproducción: cada archivo suena con una ganancia propia hacia
+  # loudness_lufs, calculada con la medida guardada en meta (loudness_lufs y
+  # true_peak_db). El archivo NO se toca: la música de Tiny Desk no se puede
+  # modificar (ADR 0002). La palabra ya sale normalizada de `post` (0 dB).
+  # Stock antiguo sin medida: `radio analyze-loudness --missing-only`.
+  normalize: true
+  gain_min_db: -12.0         # como mucho se baja 12 dB...
+  gain_max_db: 6.0           # ...y se sube 6 dB
+  true_peak_ceiling_db: -1.0 # pico verdadero + ganancia nunca por encima de −1 dBTP
 
 # Interrupciones de la parrilla (señal horaria, grid.yaml → interrupts)
 interrupts:
