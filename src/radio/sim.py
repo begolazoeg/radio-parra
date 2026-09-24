@@ -166,6 +166,8 @@ class SimReport:
     dead_air_s: float
     producer_runs: int
     producer_errors: int
+    # Normalización en reproducción: archivos medidos y ganancia aplicada (dB)
+    gain_db: dict[str, float | int | None] = field(default_factory=dict)
     decisions_sample: list[Decision] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     timeline: list[TimelineEntry] = field(default_factory=list)
@@ -187,6 +189,13 @@ class SimReport:
     def timeline_text(self) -> str:
         header = "DD HH:MM:SS  P  kind          durac.    título"
         return "\n".join([header, *(t.to_text() for t in self.timeline)])
+
+    def _gain_text(self) -> str:
+        g = self.gain_db
+        if not g.get("measured"):
+            return "Ganancia en reproducción: ningún archivo con medida de loudness"
+        return (f"Ganancia en reproducción ({g['measured']} archivos medidos): "
+                f"mín {g['min']:+.1f} dB, máx {g['max']:+.1f} dB, media {g['mean']:+.1f} dB")
 
     def to_text(self, *, timeline: bool = False) -> str:
         lines = [
@@ -217,6 +226,7 @@ class SimReport:
             + ", ".join(f"{k}: {v}" for k, v in self.rung_histogram.items()),
             f"Silencio: {self.dead_air_s:.0f} s",
             f"Producers: {self.producer_runs} ejecuciones, {self.producer_errors} con error",
+            self._gain_text(),
             "",
             "Muestra de decisiones del scheduler:",
         ]
@@ -265,7 +275,8 @@ def build_catalog(
                 # created_at distinto por pista: orden estable
                 created_at=created_at + timedelta(microseconds=order),
                 producer="sim",
-                meta={"title": title, "tags": [f"{ARTIST_PREFIX}{artist}", "source:tiny_desk"]},
+                meta={"title": title, "tags": [f"{ARTIST_PREFIX}{artist}", "source:tiny_desk"],
+                      **_sim_loudness(seg_id)},
             )
         )
     for i in range(N_JINGLES):
@@ -281,6 +292,17 @@ def build_catalog(
                 meta={"title": f"Jingle {i + 1}"},
             )
         )
+
+
+def _sim_loudness(seg_id: str) -> dict[str, float]:
+    """
+    Medida de loudness sintética (como la que guarda ``music_tinydesk``). Usa su propio
+    generador por pista para no alterar la secuencia del catálogo ni la simulación.
+    """
+    rng = random.Random(f"loudness:{seg_id}")
+    lufs = rng.uniform(-24.0, -12.0)
+    return {"loudness_lufs": round(lufs, 2),
+            "true_peak_db": round(min(0.0, lufs + rng.uniform(9.0, 17.0)), 2)}
 
 
 def talk_kinds(grid: GridConfig) -> list[str]:
@@ -628,6 +650,13 @@ def _build_report(
         dead_air_s=round(dead_air, 3),
         producer_runs=len(runs),
         producer_errors=errors,
+        gain_db={
+            "measured": engine.stats.gain.count,
+            "min": engine.stats.gain.min_db,
+            "max": engine.stats.gain.max_db,
+            "mean": (None if engine.stats.gain.mean_db is None
+                     else round(engine.stats.gain.mean_db, 2)),
+        },
         decisions_sample=sample,
         failures=failures,
         timeline=timeline,

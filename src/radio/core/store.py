@@ -310,6 +310,15 @@ class DB:
         if cur.rowcount == 0:
             raise KeyError(f"No existe el segmento {id!r}")
 
+    def update_segment_meta(self, id: str, meta: dict[str, Any]) -> None:
+        """Sustituye ``meta`` de un segmento (p. ej. medida de loudness). KeyError si no existe."""
+        cur = self._write(
+            "UPDATE segments SET meta_json = ? WHERE id = ?",
+            (json.dumps(meta, ensure_ascii=False, sort_keys=True), id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(f"No existe el segmento {id!r}")
+
     def find_by_meta(
         self,
         kind: str,

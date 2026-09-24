@@ -41,6 +41,7 @@ from radio.producers import (
     run_producer,
 )
 from radio.producers.music_tinydesk import MISSING_FEED_URL
+from radio.producers.post import LoudnessMeasurement, NullAnalyzer, PostError
 from radio.providers.llm.fake import FakeLLM
 from radio.providers.tts.fake import FakeTTS
 
@@ -123,15 +124,33 @@ def server() -> FakeServer:
     return FakeServer()
 
 
+class StubAnalyzer:
+    """Analizador falso: registra qué archivos mide y devuelve una medida fija."""
+
+    def __init__(self, result: LoudnessMeasurement | Exception | None = None) -> None:
+        self.result = result if result is not None else LoudnessMeasurement(-21.37, -2.04)
+        self.paths: list[Path] = []
+        self.sizes: list[int] = []
+
+    def analyze(self, path: Path) -> LoudnessMeasurement:
+        self.paths.append(path)
+        self.sizes.append(path.stat().st_size)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
 def make_producer(
     server: FakeServer,
     sleeps: list[float] | None = None,
     config: RadioConfig | None = None,
+    analyzer: object | None = None,
 ) -> MusicTinyDeskProducer:
     return MusicTinyDeskProducer(
         config,
         client=server.client(),
         sleep=(sleeps.append if sleeps is not None else lambda _s: None),
+        analyzer=analyzer if analyzer is not None else StubAnalyzer(),  # type: ignore[arg-type]
     )
 
 
@@ -151,9 +170,8 @@ def test_parse_entries_audio_only_newest_first() -> None:
     rosalia = entries[2]
     assert rosalia.title == "Rosalía: Tiny Desk (Home) Concert"
     assert rosalia.mime == "audio/x-wav" and rosalia.ext == ".wav"
-    assert rosalia.description == (
-        "Rosalía toca tres canciones desde casa & con amigos. Setlist: Uno, Dos."
-    )
+    # La descripción de NPR no se lee (decisión de la dueña: nunca fuente de un LLM)
+    assert not hasattr(rosalia, "description")
     assert rosalia.link == "https://podcast.fixture.invalid/episodes/rosalia"
     assert rosalia.published == datetime(2026, 9, 10, 14, 0, tzinfo=ZoneInfo("UTC"))
     assert entries[0].ext == ".wav"          # la query string no confunde la extensión
@@ -184,7 +202,7 @@ def test_artist_from_title(title: str, artist: str | None) -> None:
 def test_clean_text_and_ext_fallback() -> None:
     assert clean_text("<p>Hola&nbsp;<b>mundo</b></p>\n\n<p>adiós</p>") == "Hola mundo adiós"
     assert clean_text("x" * 50, limit=10) == "x" * 10
-    entry = FeedEntry("g", "t", f"{MEDIA}/a", "audio/mpeg", None, None, "", "")
+    entry = FeedEntry("g", "t", f"{MEDIA}/a", "audio/mpeg", None, None, "")
     assert entry.ext == ".mp3"
 
 
@@ -218,13 +236,74 @@ def test_happy_path_downloads_newest_audio(tmp_path: Path, server: FakeServer) -
     assert paak.tags == ("source:tiny_desk", "artist:anderson-paak-the-free-nationals")
     assert paak.meta["artist"] == "Anderson .Paak & The Free Nationals"
     assert paak.meta["link"] == "https://podcast.fixture.invalid/episodes/anderson-paak"
-    assert paak.meta["description"] == "Funk en la oficina."
+    assert "description" not in paak.meta
     assert paak.meta["published"] == "2026-09-21T12:00:00+00:00"
     assert paak.meta["source"] == "rss"
     assert "sources" not in paak.meta
     rosalia = ctx.db.find_by_meta("music", "guid", "fixture-guid-004")
     assert rosalia is not None and rosalia.tags == ("source:tiny_desk", "artist:rosalia")
     assert tmp_leftovers(tmp_path) == []
+
+
+def test_music_meta_never_stores_npr_description(tmp_path: Path, server: FakeServer) -> None:
+    """Las descripciones de NPR nunca se guardan (no pueden ser fuente de un LLM)."""
+    ctx = make_ctx(tmp_path, make_config(target_stock=3))
+    created = make_producer(server).produce(ctx)
+    assert created
+    for seg in ctx.db.list_segments(kind="music"):
+        assert "description" not in seg.meta
+        assert set(seg.meta) >= {"title", "guid", "link", "published"}
+        # Ni siquiera como texto dentro de otro campo
+        assert "Funk en la oficina" not in repr(seg.meta)
+        assert "tres canciones" not in repr(seg.meta)
+
+
+def test_loudness_is_measured_without_modifying_audio(
+    tmp_path: Path, server: FakeServer
+) -> None:
+    analyzer = StubAnalyzer(LoudnessMeasurement(-21.37, -2.04))
+    ctx = make_ctx(tmp_path, make_config(target_stock=1))
+    [seg] = make_producer(server, analyzer=analyzer).produce(ctx)
+    stored = ctx.db.get_segment(seg.id)
+    assert stored is not None
+    assert stored.meta["loudness_lufs"] == -21.37
+    assert stored.meta["true_peak_db"] == -2.04
+    # Se midió el temporal descargado (una vez) y el archivo final es idéntico: sin recodificar
+    assert len(analyzer.paths) == 1 and analyzer.paths[0].parent == tmp_path / "tmp"
+    assert stored.path.read_bytes() == wav_bytes()
+    assert analyzer.sizes == [len(wav_bytes())]
+
+
+@pytest.mark.parametrize(
+    "analyzer",
+    [NullAnalyzer(), StubAnalyzer(PostError("ffmpeg salió con 1")),
+     StubAnalyzer(OSError("no existe ffmpeg"))],
+    ids=["null", "post-error", "os-error"],
+)
+def test_loudness_unavailable_stores_none_and_warns(
+    tmp_path: Path, server: FakeServer, analyzer: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    ctx = make_ctx(tmp_path, make_config(target_stock=1))
+    with caplog.at_level("WARNING"):
+        [seg] = make_producer(server, analyzer=analyzer).produce(ctx)
+    stored = ctx.db.get_segment(seg.id)
+    assert stored is not None and stored.status == "ready"
+    assert stored.meta["loudness_lufs"] is None and stored.meta["true_peak_db"] is None
+    assert "loudness" in caplog.text
+
+
+def test_analyze_loudness_can_be_disabled(tmp_path: Path, server: FakeServer) -> None:
+    analyzer = StubAnalyzer()
+    ctx = make_ctx(tmp_path, make_config(target_stock=1, analyze_loudness=False))
+    [seg] = make_producer(server, analyzer=analyzer).produce(ctx)
+    assert analyzer.paths == []
+    assert seg.meta["loudness_lufs"] is None
+
+
+def test_repo_config_keeps_music_unmodified() -> None:
+    """Términos de NPR: la música no se recodifica (loudnorm: false)."""
+    params = RadioConfig.load(REPO / "config").producers.get("music_tinydesk").params
+    assert params["loudnorm"] is False
 
 
 def test_rerun_dedups_by_guid_and_uses_conditional_get(tmp_path: Path, server: FakeServer) -> None:

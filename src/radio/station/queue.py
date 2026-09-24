@@ -33,7 +33,8 @@ class QueueItem:
     ``segment`` None = bucle de emergencia. ``unit_no`` agrupa los archivos de una
     misma ``PlayUnit`` (p. ej. ``[host_intro, music]``). ``play_id`` es la fila de
     ``play_log`` abierta al empezar. ``cut`` marca lo que la emisora cortó para dar
-    paso a una interrupción.
+    paso a una interrupción. ``gain_db`` es la ganancia de reproducción con la que se
+    encoló (``radio.station.gain``; 0 dB sin medida).
     """
     path: Path
     kind: str
@@ -44,6 +45,7 @@ class QueueItem:
     play_id: int | None = None
     started_at: datetime | None = None
     cut: bool = False
+    gain_db: float = 0.0
 
     @property
     def is_emergency(self) -> bool:

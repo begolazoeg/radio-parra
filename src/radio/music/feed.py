@@ -10,8 +10,11 @@ oficial del podcast; nada de scraping).
   no merece tabla propia ni cambio de esquema, y ``universe_state`` es para ficción.
 - ``parse_entries``: entradas con enclosure de **audio** (los de vídeo se ignoran),
   de la más reciente a la más antigua.
-- ``clean_text`` / ``artist_from_title``: descripción en texto plano (para el
-  grounding de ``host_intro`` en Fase 2) y artista deducido de "Artista: Tiny Desk…".
+- ``clean_text`` / ``artist_from_title``: título en texto plano y artista deducido de
+  "Artista: Tiny Desk…".
+
+La descripción de los episodios **no se lee**: la dueña decidió que las descripciones
+de NPR nunca se usen como fuente de un LLM (términos de NPR sobre sistemas de IA).
 
 La URL del feed es la decisión abierta #8: no hay ninguna por defecto en el código.
 """
@@ -37,7 +40,7 @@ from radio.music.library import AUDIO_EXTENSIONS
 USER_AGENT = "RadioParra/0.1 (+contacto en README)"
 TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 MAX_FEED_BYTES = 20 * 1024 * 1024
-MAX_DESCRIPTION_CHARS = 4000
+MAX_TEXT_CHARS = 4000
 
 # Tipo MIME → extensión, para enclosures cuya URL no la trae
 _MIME_EXT = {
@@ -78,7 +81,7 @@ class _TextExtractor(HTMLParser):
             self.parts.append(" ")
 
 
-def clean_text(raw: str, limit: int = MAX_DESCRIPTION_CHARS) -> str:
+def clean_text(raw: str, limit: int = MAX_TEXT_CHARS) -> str:
     """HTML → texto plano: sin etiquetas, entidades resueltas, espacios colapsados."""
     parser = _TextExtractor()
     parser.feed(raw)
@@ -108,7 +111,6 @@ class FeedEntry:
     length: int | None
     published: datetime | None
     link: str
-    description: str
 
     @property
     def ext(self) -> str:
@@ -158,9 +160,6 @@ def parse_entries(body: bytes) -> list[FeedEntry]:
             continue
         url, mime, length = enclosure
         guid = str(entry.get("id") or url)
-        raw_description = str(
-            entry.get("summary") or entry.get("itunes_summary") or entry.get("subtitle") or ""
-        )
         entries.append(FeedEntry(
             guid=guid,
             title=clean_text(str(entry.get("title") or ""), 300) or guid,
@@ -169,7 +168,6 @@ def parse_entries(body: bytes) -> list[FeedEntry]:
             length=length,
             published=_published(entry),
             link=str(entry.get("link") or ""),
-            description=clean_text(raw_description),
         ))
     oldest = datetime.min.replace(tzinfo=UTC)
     # sort estable: sin fecha → al final, conservando el orden del feed
