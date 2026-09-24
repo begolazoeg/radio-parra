@@ -4,8 +4,9 @@ Tests unitarios para la capa de persistencia (store.py).
 
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 from radio.core.store import DB
 
@@ -145,3 +146,53 @@ def test_universe_state(db: DB) -> None:
     # Valor complejo
     db.set_universe_state("characters", {"hero": "Ana", "villain": "Rodolfo"})
     assert db.get_universe_state("characters")["hero"] == "Ana"
+
+
+# ── Consultas para scheduler / playout ────────────────────────────────────────
+
+def test_pick_ready_prefers_never_played_then_least_recent(db: DB) -> None:
+    """pick_ready elige primero lo nunca emitido y después lo emitido hace más tiempo."""
+    for i, created in enumerate(["2024-01-01T00:00:00", "2024-01-02T00:00:00"]):
+        db.add_segment(
+            id=f"m{i}", kind="music", status="ready", created_at=created,
+            title=f"t{i}", producer="music",
+        )
+    assert db.pick_ready("music")["id"] == "m0"  # type: ignore[index]
+    db.log_play("m0", started_at="2024-02-01T10:00:00")
+    assert db.pick_ready("music")["id"] == "m1"  # type: ignore[index]
+    db.log_play("m1", started_at="2024-02-01T11:00:00")
+    assert db.pick_ready("music")["id"] == "m0"  # type: ignore[index]
+    assert db.pick_ready("fiction") is None
+
+
+def test_pick_ready_exclude_tags(db: DB) -> None:
+    db.add_segment(id="a", kind="music", status="ready", title="a", producer="m", tags=["artist:x"])
+    db.add_segment(id="b", kind="music", status="ready", title="b", producer="m", tags=["artist:y"])
+    db.log_play("b")
+    assert db.pick_ready("music", exclude_tags=["artist:x"])["id"] == "b"  # type: ignore[index]
+
+
+def test_count_ready_and_audio_path_lookup(db: DB) -> None:
+    db.add_segment(id="a", kind="music", status="ready", title="a", producer="m",
+                   audio_path=Path("/x/a.mp3"))
+    db.add_segment(id="b", kind="jingle", status="pending", title="b", producer="m")
+    assert db.count_ready_by_kind() == {"music": 1}
+    assert db.get_segment_by_audio_path("/x/a.mp3")["id"] == "a"  # type: ignore[index]
+    assert db.get_segment_by_audio_path("/x/none.mp3") is None
+
+
+def test_list_plays_and_finish_play(db: DB) -> None:
+    db.add_segment(id="a", kind="music", status="ready", title="a", producer="m", duration_s=5)
+    pid = db.log_play("a", started_at="2024-01-01T10:00:00")
+    db.finish_play(pid, ended_at="2024-01-01T10:00:05")
+    plays = db.list_plays(since="2024-01-01T00:00:00")
+    assert len(plays) == 1
+    assert plays[0]["kind"] == "music" and plays[0]["ended_at"] == "2024-01-01T10:00:05"
+    assert db.list_plays(since="2025-01-01T00:00:00") == []
+
+
+def test_last_producer_run(db: DB) -> None:
+    assert db.last_producer_run("x") is None
+    db.log_producer_run("x", started_at="2024-01-01T00:00:00")
+    db.log_producer_run("x", started_at="2024-01-02T00:00:00", status="error")
+    assert db.last_producer_run("x")["status"] == "error"  # type: ignore[index]

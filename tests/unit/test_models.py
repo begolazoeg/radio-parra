@@ -4,13 +4,13 @@ Tests unitarios para los modelos de dominio.
 
 from __future__ import annotations
 
-import pytest
 from dataclasses import FrozenInstanceError
 from datetime import datetime
 from pathlib import Path
 
-from radio.core.models import Segment, Voice, SegmentStatus
+import pytest
 
+from radio.core.models import Segment, SegmentStatus, Voice
 
 # ── test_segment_creation ─────────────────────────────────────────────────────
 
@@ -92,7 +92,8 @@ def test_voice_without_consent_is_flagged() -> None:
     pero VoicesConfig debe rechazarla en validación.
     """
     from pydantic import ValidationError
-    from radio.core.config import VoiceEntry, VoicesConfig
+
+    from radio.core.config import VoiceEntry
 
     with pytest.raises(ValidationError):
         VoiceEntry(

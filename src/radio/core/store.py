@@ -187,6 +187,48 @@ class DB:
         )
         self._conn.commit()
 
+    def get_segment_by_audio_path(self, audio_path: Path | str) -> dict[str, Any] | None:
+        """Devuelve el segmento cuyo audio_path coincide, o None (útil para deduplicar)."""
+        row = self._conn.execute(
+            "SELECT * FROM segments WHERE audio_path = ?", (str(audio_path),)
+        ).fetchone()
+        return _deserialize_row(row) if row else None
+
+    def count_ready_by_kind(self) -> dict[str, int]:
+        """Número de segmentos en estado 'ready' agrupados por kind."""
+        rows = self._conn.execute(
+            "SELECT kind, COUNT(*) AS n FROM segments WHERE status = 'ready' GROUP BY kind"
+        ).fetchall()
+        return {r["kind"]: int(r["n"]) for r in rows}
+
+    def pick_ready(
+        self,
+        kind: str,
+        *,
+        exclude_tags: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Elige un segmento 'ready' de `kind`: primero el que nunca se ha emitido,
+        luego el emitido hace más tiempo; desempata por created_at ascendente.
+        `exclude_tags` descarta segmentos que tengan alguna de esas etiquetas.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT s.*, MAX(p.started_at) AS last_played_at
+            FROM segments s LEFT JOIN plays p ON p.segment_id = s.id
+            WHERE s.kind = ? AND s.status = 'ready'
+            GROUP BY s.id
+            ORDER BY last_played_at IS NOT NULL, last_played_at ASC, s.created_at ASC
+            """,
+            (kind,),
+        ).fetchall()
+        excluded = set(exclude_tags or [])
+        for row in rows:
+            d = _deserialize_row(row)
+            if excluded.isdisjoint(d["tags"]):
+                return d
+        return None
+
     # ── Plays ─────────────────────────────────────────────────────────────────
 
     def log_play(
@@ -206,6 +248,30 @@ class DB:
         )
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
+
+    def finish_play(self, play_id: int, ended_at: str | None = None, interrupted: bool = False) -> None:
+        """Cierra una reproducción abierta con su hora de fin."""
+        self._conn.execute(
+            "UPDATE plays SET ended_at = ?, interrupted = ? WHERE id = ?",
+            (ended_at or _now(), int(interrupted), play_id),
+        )
+        self._conn.commit()
+
+    def list_plays(self, since: str | None = None) -> list[dict[str, Any]]:
+        """
+        Lista reproducciones (más antigua primero) unidas con kind/duration_s
+        del segmento. `since` filtra por started_at >= since (ISO 8601).
+        """
+        query = """
+            SELECT p.*, s.kind AS kind, s.duration_s AS duration_s, s.title AS title
+            FROM plays p JOIN segments s ON s.id = p.segment_id
+        """
+        params: list[Any] = []
+        if since is not None:
+            query += " WHERE p.started_at >= ?"
+            params.append(since)
+        query += " ORDER BY p.started_at ASC, p.id ASC"
+        return [dict(r) for r in self._conn.execute(query, params).fetchall()]
 
     # ── Producer runs ─────────────────────────────────────────────────────────
 
@@ -227,6 +293,14 @@ class DB:
         )
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
+
+    def last_producer_run(self, producer: str) -> dict[str, Any] | None:
+        """Última ejecución registrada de `producer` (por started_at), o None."""
+        row = self._conn.execute(
+            "SELECT * FROM producer_runs WHERE producer = ? ORDER BY started_at DESC, id DESC LIMIT 1",
+            (producer,),
+        ).fetchone()
+        return dict(row) if row else None
 
     # ── Universe state ────────────────────────────────────────────────────────
 

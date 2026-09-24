@@ -87,7 +87,7 @@ def stock() -> None:
         return
 
     # Agrupar por kind
-    by_kind: dict[str, list[dict]] = {}
+    by_kind: dict[str, list[dict[str, object]]] = {}
     for seg in segments:
         by_kind.setdefault(seg["kind"], []).append(seg)
 
@@ -95,6 +95,7 @@ def stock() -> None:
         typer.echo(f"\n{kind.upper()} ({len(items)})")
         status_counts: dict[str, int] = {}
         for item in items:
-            status_counts[item["status"]] = status_counts.get(item["status"], 0) + 1
+            status = str(item["status"])
+            status_counts[status] = status_counts.get(status, 0) + 1
         for status, count in sorted(status_counts.items()):
             typer.echo(f"  {status}: {count}")

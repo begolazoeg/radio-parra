@@ -4,8 +4,9 @@ Abstracción de reloj para permitir tests deterministas.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Protocol, runtime_checkable
+from zoneinfo import ZoneInfo
 
 
 @runtime_checkable
@@ -17,10 +18,21 @@ class Clock(Protocol):
 
 
 class SystemClock:
-    """Reloj real que delega en datetime.now()."""
+    """
+    Reloj real. Devuelve siempre datetimes con zona horaria (aware),
+    por defecto en UTC; pasar `tz` (p. ej. "Europe/Madrid") para hora local.
+    """
+
+    def __init__(self, tz: str | tzinfo | None = None) -> None:
+        if tz is None:
+            self._tz: tzinfo = UTC
+        elif isinstance(tz, str):
+            self._tz = ZoneInfo(tz)
+        else:
+            self._tz = tz
 
     def now(self) -> datetime:
-        return datetime.now()
+        return datetime.now(self._tz)
 
 
 class FakeClock:

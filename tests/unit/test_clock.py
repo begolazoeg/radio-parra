@@ -33,3 +33,11 @@ def test_system_clock_returns_datetime() -> None:
     clock = SystemClock()
     result = clock.now()
     assert isinstance(result, datetime)
+
+
+def test_system_clock_is_timezone_aware() -> None:
+    """SystemClock devuelve datetimes aware (UTC por defecto o la zona pedida)."""
+    assert SystemClock().now().tzinfo is not None
+    madrid = SystemClock("Europe/Madrid").now()
+    assert madrid.tzinfo is not None
+    assert str(madrid.tzinfo) == "Europe/Madrid"
