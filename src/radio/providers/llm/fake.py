@@ -53,4 +53,5 @@ class FakeLLM:
             text=text,
             input_tokens=len(system.split()) + len(user.split()),
             output_tokens=len(text.split()),
+            model="fake",
         )

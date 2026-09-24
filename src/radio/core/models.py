@@ -57,10 +57,16 @@ class SourceDoc:
 
 @dataclass(frozen=True)
 class LLMResult:
-    """Respuesta cruda de un proveedor LLM."""
+    """
+    Respuesta cruda de un proveedor LLM. ``model`` es el id que respondió y
+    ``cost_eur`` el coste estimado de la llamada (lo suma el productor en
+    ``producer_runs.cost_eur`` para la regla de gasto, §4.2); los fakes dejan 0.
+    """
     text: str
     input_tokens: int
     output_tokens: int
+    model: str = ""
+    cost_eur: float = 0.0
 
 
 @dataclass(frozen=True)
