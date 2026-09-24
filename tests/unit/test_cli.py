@@ -47,8 +47,8 @@ def test_stock_reports_targets_statuses_and_expirations(tmp_path: Path) -> None:
     # time_signal: 1 ready frente a objetivo 2 (activo en producers.yaml)
     assert lines["time_signal"].split()[1:3] == ["1", "2"]
     assert "expired: 1" in lines["time_signal"] and "ready: 1" in lines["time_signal"]
-    # music: sin productor activo → sin objetivo
-    assert lines["music"].split()[1:3] == ["1", "-"]
+    # music: music_tinydesk activo en producers.yaml → objetivo 30
+    assert lines["music"].split()[1:3] == ["1", "30"]
     assert "quarantined: 1" in lines["music"]
     assert "Próximas caducidades" in result.output
     assert "Señal horaria 11:00" in result.output
