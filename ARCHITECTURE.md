@@ -550,7 +550,13 @@ Cada fase termina en una rama/PR con **criterios de aceptación** verificables.
 1. **Nombre de la emisora** (afecta jingles y prompts).
 2. **Idioma(s)** de la radio: ¿solo español, o alternar con catalán? (afecta TTS, prompts y fuentes).
 3. **Proveedor de TTS** principal (nube vs. Piper local) y presupuesto mensual.
+   → *Resuelta (2026-09-24):* Piper local por defecto (offline, sin coste por carácter); la nube
+   (ElevenLabs) queda implementada pero desactivada. El presupuesto mensual sigue en `station.yaml →
+   budget.monthly_eur` (valor provisional). Ver ADR 0003.
 4. **Voz del locutor:** sintética genérica o voz propia clonada (con consentimiento propio).
+   → *Resuelta (2026-09-24):* voz sintética genérica por ahora (`locutor_principal`, modelo de
+   Piper; su licencia la revisa la dueña antes de emitir). Clonar la voz propia más adelante sigue
+   siendo posible (con `consent: true`). Ver ADR 0003.
 5. **Dónde se producen los segmentos:** en la propia Pi o en el portátil con sincronización.
 6. **Fuentes de noticias** concretas (2-3 medios con RSS).
 7. **Calendario y datos personales:** qué se conecta y qué queda fuera de la radio.
