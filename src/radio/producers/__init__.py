@@ -11,6 +11,7 @@ from radio.producers.base import (
     RunStats,
     StagedProducer,
     budget_exhausted,
+    call_llm,
     pick_voice,
     write_segment_audio,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "build_context",
     "build_producer",
     "build_producers",
+    "call_llm",
     "choose_post",
     "pick_voice",
     "produce",

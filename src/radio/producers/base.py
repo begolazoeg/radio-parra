@@ -12,6 +12,11 @@ los lee. Este módulo define:
   y testeable por separado. Una etapa puede lanzar ``DraftRejected`` para descartar
   un borrador sin hacer fallar la ejecución; cualquier otra excepción la hace fallar
   (el runner la registra en ``producer_runs`` y no toca lo existente, §8).
+  Un borrador puede registrarse como ``quarantined`` (``Draft.status``; §3.3:
+  "validación falla 2× → quarantined") para revisión manual: se guarda con su audio
+  pero no cuenta como creado ni como stock.
+- ``call_llm``: llamada al LLM que suma coste y tokens a ``ctx.stats`` (también
+  los de una llamada fallida pero facturada, ``LLMError.cost_eur``).
 - ``register``: escritura atómica (§3.3): audio en ``data/tmp/`` → ``commit_audio``
   a ``data/stock/<kind>/`` → fila ``Segment`` + ``state_delta`` de ficción en la
   misma ``db.transaction()``. Nunca hay una fila ``ready`` sin su archivo completo.
@@ -31,10 +36,20 @@ from zoneinfo import ZoneInfo
 from radio.core.clock import Clock
 from radio.core.config import ProducerSettings, RadioConfig
 from radio.core.ids import new_id
-from radio.core.models import AudioInfo, Segment, SegmentKind, SourceDoc, StockView, Voice
+from radio.core.models import (
+    AudioInfo,
+    LLMResult,
+    Segment,
+    SegmentKind,
+    SourceDoc,
+    Status,
+    StockView,
+    Voice,
+)
 from radio.core.paths import commit_audio, stock_dir, tmp_dir
 from radio.core.store import DB
 from radio.producers.post import AudioPost, NullPost
+from radio.providers.errors import LLMError
 from radio.providers.llm.base import LLM
 from radio.providers.tts.base import TTS
 
@@ -59,6 +74,7 @@ class RunStats:
     """Consumo de una ejecución (columnas de ``producer_runs``)."""
     n_segments: int = 0
     rejected: int = 0
+    quarantined: int = 0                # registrados en cuarentena (revisión manual)
     tokens_in: int = 0
     tokens_out: int = 0
     tts_chars: int = 0
@@ -127,6 +143,8 @@ class Draft:
     # Ficción (§6): cambios de estado del universo, aplicados al registrar
     universe: str | None = None
     state_delta: dict[str, Any] | None = None
+    # Estado con el que se registra: ``ready`` o ``quarantined`` (revisión manual)
+    status: Status = "ready"
 
 
 # ── Plantilla por etapas ──────────────────────────────────────────────────────
@@ -208,7 +226,9 @@ class StagedProducer:
                 raise DraftRejected("; ".join(problems))
             draft = self.tts(ctx, draft)
             draft = self.post(ctx, draft)
-            return self.register(ctx, draft)
+            seg = self.register(ctx, draft)
+            # En cuarentena queda registrado para revisión, pero no es stock creado
+            return seg if seg.status == "ready" else None
         except DraftRejected as exc:
             ctx.stats.rejected += 1
             logger.warning("%s: borrador %s descartado: %s", self.name, draft.id, exc)
@@ -257,7 +277,9 @@ class StagedProducer:
         # Se anota antes de sintetizar para que ``run_stages`` limpie si falla
         draft.audio = AudioInfo(path=tmp_path, duration_s=0.0)
         info = ctx.tts.synthesize(draft.script, draft.voice, tmp_path)
-        ctx.stats.tts_chars += len(draft.script)
+        # Solo lo sintetizado de verdad: un acierto de la caché de TTS no se factura
+        if not info.cached:
+            ctx.stats.tts_chars += len(draft.script)
         draft.audio = AudioInfo(path=tmp_path, duration_s=info.duration_s)
         draft.ext = ".wav"
         return draft
@@ -295,7 +317,12 @@ class StagedProducer:
             final.unlink(missing_ok=True)
             raise
         draft.audio = AudioInfo(path=final, duration_s=draft.audio.duration_s)
-        ctx.stats.n_segments += 1
+        if seg.status == "ready":
+            ctx.stats.n_segments += 1
+        else:
+            ctx.stats.quarantined += 1
+            logger.warning("%s: segmento %s registrado como %r para revisión manual",
+                           self.name, seg.id, seg.status)
         return seg
 
     def build_segment(self, ctx: ProducerContext, draft: Draft, path: Path) -> Segment:
@@ -316,6 +343,7 @@ class StagedProducer:
             duration_s=draft.audio.duration_s,
             created_at=ctx.clock.now(),
             producer=self.name,
+            status=draft.status,
             expires_at=draft.expires_at,
             priority=draft.priority,
             parent_id=draft.parent_id,
@@ -340,6 +368,39 @@ class StagedProducer:
             expected_version=version,
             updated_at=ctx.clock.now(),
         )
+
+
+# ── LLM con contabilidad ──────────────────────────────────────────────────────
+
+def call_llm(
+    ctx: ProducerContext,
+    system: str,
+    user: str,
+    *,
+    temperature: float,
+    json_schema: dict[str, Any] | None = None,
+    max_tokens: int = 1000,
+) -> LLMResult:
+    """
+    ``ctx.llm.complete`` sumando tokens y coste a ``ctx.stats`` (columnas de
+    ``producer_runs`` y regla de gasto, §4.2). Si la llamada falla pero llegó a
+    facturarse (``LLMError.cost_eur``: rechazo, respuesta cortada, JSON inválido), ese
+    coste también se suma antes de propagar la excepción.
+    """
+    try:
+        result = ctx.llm.complete(
+            system, user, temperature=temperature, json_schema=json_schema,
+            max_tokens=max_tokens,
+        )
+    except LLMError as exc:
+        ctx.stats.tokens_in += exc.input_tokens
+        ctx.stats.tokens_out += exc.output_tokens
+        ctx.stats.cost_eur += exc.cost_eur
+        raise
+    ctx.stats.tokens_in += result.input_tokens
+    ctx.stats.tokens_out += result.output_tokens
+    ctx.stats.cost_eur += result.cost_eur
+    return result
 
 
 # ── Regla de gasto ────────────────────────────────────────────────────────────

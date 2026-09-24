@@ -73,9 +73,14 @@ class LLMResult:
 
 @dataclass(frozen=True)
 class AudioInfo:
-    """Metadatos de un archivo de audio ya generado o importado."""
+    """
+    Metadatos de un archivo de audio ya generado o importado. ``cached`` es True si
+    un TTS lo ha servido desde su caché (``CachedTTS``) sin sintetizar ni facturar:
+    esos caracteres no cuentan en ``producer_runs.tts_chars``.
+    """
     path: Path
     duration_s: float
+    cached: bool = False
 
 
 # ── Segmento principal ────────────────────────────────────────────────────────

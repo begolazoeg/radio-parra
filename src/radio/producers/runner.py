@@ -66,6 +66,7 @@ class RunResult:
     dry_run: bool = False
     segment_ids: tuple[str, ...] = ()
     rejected: int = 0
+    quarantined: int = 0
     error: str | None = None
 
 
@@ -87,6 +88,7 @@ class ProduceReport:
                 lines.append(f"{r.name:<16} tocaría ({r.reason}{extra})")
             elif r.ok:
                 extra = f", {r.rejected} descartados" if r.rejected else ""
+                extra += f", {r.quarantined} en cuarentena" if r.quarantined else ""
                 lines.append(f"{r.name:<16} OK: {len(r.segment_ids)} segmentos{extra} ({r.reason})")
             else:
                 lines.append(f"{r.name:<16} ERROR: {r.error} ({r.reason})")
@@ -138,7 +140,7 @@ def run_producer(ctx: ProducerContext, producer: Producer, *, reason: str = "", 
     )
     return RunResult(
         producer.name, reason, deficit, ok=error is None,
-        segment_ids=ids, rejected=stats.rejected, error=error,
+        segment_ids=ids, rejected=stats.rejected, quarantined=stats.quarantined, error=error,
     )
 
 

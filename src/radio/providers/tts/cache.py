@@ -6,7 +6,8 @@ Caché de TTS (§4.1): no pagar (ni sintetizar) dos veces lo mismo.
 ``cache_variant`` del proveedor, si la tiene: modelo y formato de la nube o
 argumentos de Piper, para no servir un audio hecho con otra configuración).
 
-- Acierto: se copia el audio cacheado a ``out_path`` (no se llama al proveedor).
+- Acierto: se copia el audio cacheado a ``out_path`` (no se llama al proveedor) y
+  se devuelve ``AudioInfo(cached=True)``: el productor no lo suma a ``tts_chars``.
 - Fallo: se sintetiza en ``out_path`` y se guarda una copia en la caché, con
   escritura atómica (temporal + ``os.replace``) y un ``.json`` con la duración.
 - ``hits`` / ``misses`` cuentan aciertos y fallos.
@@ -65,7 +66,7 @@ class CachedTTS:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(audio, out_path)
             self.hits += 1
-            return AudioInfo(path=out_path, duration_s=cached)
+            return AudioInfo(path=out_path, duration_s=cached, cached=True)
 
         self.misses += 1
         info = self.inner.synthesize(text, voice, out_path)
