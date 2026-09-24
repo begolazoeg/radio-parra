@@ -85,6 +85,11 @@ decisión #8 (ADR 0002) quedó pendiente revisar los términos de NPR antes de e
 - **register**: `parent_id` = la canción; `meta`: título, guion, claims, fuentes con
   licencia, informe de grounding (resultado, problemas, términos permitidos, número
   de intentos), todos los intentos, modelo, coste y tokens; `summary` corto.
+- **Antes de gastar** (`preflight`): si hay algo que escribir, se comprueba sin red que
+  el LLM está configurado y que la voz se puede sintetizar (binario y modelo de Piper);
+  si no, la ejecución falla sin consultar fuentes ni pagar guiones. Si el TTS falla
+  después (Piper se cae a mitad), ese guion ya pagado se pierde y se reescribe en la
+  siguiente pasada.
 - **Coste**: `call_llm` suma a `producer_runs` tokens y `cost_eur` de cada llamada,
   también de las fallidas pero facturadas (`LLMError.cost_eur`). `tts_chars` ya solo
   cuenta lo sintetizado de verdad (los aciertos de `CachedTTS` no).
