@@ -1,0 +1,34 @@
+{
+  "_comment": "Respuesta sintética con la forma real de la API; 'Nube Ferrán' es una artista ficticia y ningún id ni texto corresponde a nada real.",
+  "created": "2026-09-24T10:00:00.000Z",
+  "count": 2,
+  "offset": 0,
+  "artists": [
+    {
+      "id": "5e1f0a3c-0000-4000-8000-00000000f001",
+      "type": "Person",
+      "score": 100,
+      "name": "Nube Ferrán",
+      "sort-name": "Ferrán, Nube",
+      "country": "US",
+      "disambiguation": "cantautora ficticia de pruebas",
+      "life-span": {
+        "begin": "1991-05-17",
+        "ended": null
+      }
+    },
+    {
+      "id": "5e1f0a3c-0000-4000-8000-00000000f002",
+      "type": "Group",
+      "score": 100,
+      "name": "Nube Ferrán",
+      "sort-name": "Nube Ferrán",
+      "country": "ES",
+      "disambiguation": "grupo ficticio homónimo",
+      "life-span": {
+        "begin": "2004",
+        "ended": null
+      }
+    }
+  ]
+}

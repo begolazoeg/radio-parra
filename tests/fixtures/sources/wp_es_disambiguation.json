@@ -1,0 +1,20 @@
+{
+  "_comment": "Respuesta sintética con la forma real de la API; 'Nube Ferrán' es una artista ficticia y ningún id ni texto corresponde a nada real.",
+  "type": "disambiguation",
+  "title": "Nube Ferrán",
+  "displaytitle": "Nube Ferrán",
+  "titles": {
+    "canonical": "Nube_Ferrán",
+    "normalized": "Nube Ferrán",
+    "display": "Nube Ferrán"
+  },
+  "pageid": 99900013,
+  "lang": "es",
+  "content_urls": {
+    "desktop": {
+      "page": "https://es.wikipedia.org/wiki/Nube_Ferr%C3%A1n"
+    }
+  },
+  "extract": "Nube Ferrán puede referirse a:",
+  "extract_html": "<p><b>Nube Ferrán</b> puede referirse a:</p>"
+}
