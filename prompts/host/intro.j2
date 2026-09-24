@@ -1,0 +1,15 @@
+Escribe una intervención breve para dar paso a la siguiente canción en {{ station_name }}.
+
+Contexto:
+- Hora local: {{ local_time }} ({{ time_of_day }}).
+{% if recent_music %}
+- Últimas canciones emitidas (la más reciente primero):
+{% for title in recent_music %}
+  - {{ title }}
+{% endfor %}
+{% else %}
+- Todavía no ha sonado música en esta sesión.
+{% endif %}
+
+Saluda acorde al momento del día ({{ time_of_day }}), puedes mencionar de pasada lo que acaba de sonar usando solo los títulos de arriba, y da paso a más música en directo sin anunciar un título concreto.
+Responde solo con {"script": "..."}.
