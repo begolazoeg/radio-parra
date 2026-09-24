@@ -206,22 +206,28 @@ class DB:
         kind: str,
         *,
         exclude_tags: list[str] | None = None,
+        max_duration_s: float | None = None,
     ) -> dict[str, Any] | None:
         """
         Elige un segmento 'ready' de `kind`: primero el que nunca se ha emitido,
-        luego el emitido hace más tiempo; desempata por created_at ascendente.
+        luego el emitido hace más tiempo; desempata por created_at y después id.
         `exclude_tags` descarta segmentos que tengan alguna de esas etiquetas.
+        `max_duration_s` descarta los que duren más de ese número de segundos.
         """
-        rows = self._conn.execute(
-            """
+        query = """
             SELECT s.*, MAX(p.started_at) AS last_played_at
             FROM segments s LEFT JOIN plays p ON p.segment_id = s.id
             WHERE s.kind = ? AND s.status = 'ready'
+        """
+        params: list[Any] = [kind]
+        if max_duration_s is not None:
+            query += " AND s.duration_s <= ?"
+            params.append(max_duration_s)
+        query += """
             GROUP BY s.id
-            ORDER BY last_played_at IS NOT NULL, last_played_at ASC, s.created_at ASC
-            """,
-            (kind,),
-        ).fetchall()
+            ORDER BY last_played_at IS NOT NULL, last_played_at ASC, s.created_at ASC, s.id ASC
+        """
+        rows = self._conn.execute(query, params).fetchall()
         excluded = set(exclude_tags or [])
         for row in rows:
             d = _deserialize_row(row)
@@ -301,6 +307,16 @@ class DB:
             (producer,),
         ).fetchone()
         return dict(row) if row else None
+
+    def count_producer_runs(self, status: str | None = None) -> int:
+        """Número de ejecuciones de producers registradas (opcionalmente por status)."""
+        if status is None:
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM producer_runs").fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM producer_runs WHERE status = ?", (status,)
+            ).fetchone()
+        return int(row["n"])
 
     # ── Universe state ────────────────────────────────────────────────────────
 

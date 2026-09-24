@@ -172,6 +172,16 @@ def test_pick_ready_exclude_tags(db: DB) -> None:
     assert db.pick_ready("music", exclude_tags=["artist:x"])["id"] == "b"  # type: ignore[index]
 
 
+def test_pick_ready_max_duration(db: DB) -> None:
+    db.add_segment(id="long", kind="music", status="ready", title="l", producer="m",
+                   duration_s=600, created_at="2024-01-01T00:00:00")
+    db.add_segment(id="short", kind="music", status="ready", title="s", producer="m",
+                   duration_s=200, created_at="2024-01-02T00:00:00")
+    assert db.pick_ready("music")["id"] == "long"  # type: ignore[index]
+    assert db.pick_ready("music", max_duration_s=300)["id"] == "short"  # type: ignore[index]
+    assert db.pick_ready("music", max_duration_s=100) is None
+
+
 def test_count_ready_and_audio_path_lookup(db: DB) -> None:
     db.add_segment(id="a", kind="music", status="ready", title="a", producer="m",
                    audio_path=Path("/x/a.mp3"))
@@ -196,3 +206,12 @@ def test_last_producer_run(db: DB) -> None:
     db.log_producer_run("x", started_at="2024-01-01T00:00:00")
     db.log_producer_run("x", started_at="2024-01-02T00:00:00", status="error")
     assert db.last_producer_run("x")["status"] == "error"  # type: ignore[index]
+
+
+def test_count_producer_runs(db: DB) -> None:
+    assert db.count_producer_runs() == 0
+    db.log_producer_run("x", status="ok")
+    db.log_producer_run("x", status="error")
+    db.log_producer_run("y", status="error")
+    assert db.count_producer_runs() == 3
+    assert db.count_producer_runs(status="error") == 2
