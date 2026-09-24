@@ -196,7 +196,11 @@ def test_tinydesk_mode_loops_music_only_for_48h() -> None:
                             prompts_dir=REPO / "prompts", mode="tinydesk", catalog="tinydesk",
                             start=SIM_START)
     assert report.passed, report.failures
-    assert report.airtime_s["music"] >= 48 * 3600 - 1
-    assert {k for k, v in report.airtime_s.items() if v > 0} == {"music"}
+    # Modo tinydesk = solo música + las intros del locutor pegadas a cada concierto
+    # (Fase 2); ningún otro kind suena
+    on_air = report.airtime_s["music"] + report.airtime_s["host_intro"]
+    assert on_air >= 48 * 3600 - 1
+    assert report.airtime_s["music"] / on_air > 0.99
+    assert {k for k, v in report.airtime_s.items() if v > 0} <= {"music", "host_intro"}
     assert report.units_aired > 40            # 40 conciertos: se repiten (bucle)
     assert report.dead_air_s == 0 and report.rung_histogram["5"] == 0
