@@ -10,7 +10,7 @@ Se lanza como ``[sys.executable, fake_mpv.py, --idle=yes, ..., --input-ipc-serve
 - Un archivo cuyo nombre contiene ``crash`` mata el proceso (``os._exit``) justo
   después de emitir ``start-file``: sirve para probar el watchdog.
 - Comandos: ``loadfile <f> [append-play|append|replace]``, ``playlist-next [weak|force]``,
-  ``playlist-remove <i>``, ``stop``, ``quit``, ``get_property <playlist|idle-active|
+  ``playlist-remove <i>``, ``playlist-clear``, ``stop``, ``quit``, ``get_property <playlist|idle-active|
   playlist-pos|path>``, ``observe_property <id> idle-active``.
 - Eventos: ``start-file``, ``file-loaded``, ``end-file`` (eof/stop/quit/error), ``idle``
   y ``property-change`` de ``idle-active``.
@@ -176,6 +176,12 @@ class FakeMpv:
                 if not 0 <= i < len(self.playlist) or self.playlist[i] is self.playing:
                     return "error", None
                 del self.playlist[i]
+                return "success", None
+            if name == "playlist-clear":
+                # Como mpv: todo fuera salvo el archivo en curso
+                self.playlist = [self.playing] if self.playing is not None else []
+                if self.to_play is not None and self.to_play is not self.playing:
+                    self.to_play = None
                 return "success", None
             if name == "stop":
                 self.playlist = []

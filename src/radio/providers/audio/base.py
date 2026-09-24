@@ -4,7 +4,8 @@ Protocolos base para backends de reproducción de audio.
 - ``AudioBackend``: interfaz mínima de ARCHITECTURE.md §4.1 (play/enqueue/skip).
 - ``QueueingAudioBackend``: lo que además necesita la emisora para mantener un
   *lookahead* de 2–3 unidades y escribir ``play_log`` al empezar y terminar (§4.4):
-  eventos ``Started``/``Ended``, tamaño de la cola, archivo en curso, watchdog y cierre.
+  eventos ``Started``/``Ended``, tamaño de la cola, archivo en curso, vaciado de lo
+  pendiente (interrupciones), watchdog y cierre.
 
 Implementaciones: ``MpvIpcBackend`` (real), ``FakeEventBackend`` (simulación
 determinista con eventos) y ``NullAudioBackend`` (solo registra llamadas).
@@ -67,6 +68,14 @@ class QueueingAudioBackend(AudioBackend, Protocol):
 
     def current(self) -> Path | None:
         """Archivo que suena ahora, o ``None``."""
+        ...
+
+    def clear_pending(self) -> int:
+        """
+        Descarta los archivos encolados que aún no han empezado (sin eventos) y
+        devuelve cuántos eran. El que suena sigue sonando. Lo usa la emisora para
+        dar paso a una interrupción (señal horaria) por delante de su *lookahead*.
+        """
         ...
 
     def alive(self) -> bool:

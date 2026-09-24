@@ -30,7 +30,6 @@ from radio.providers.audio import (
     QueueingAudioBackend,
     Started,
 )
-from radio.providers.audio.mpv import MpvAudioBackend
 
 FAKE_MPV = Path(__file__).resolve().parents[1] / "fixtures" / "fake_mpv.py"
 TIMEOUT = 5.0
@@ -88,7 +87,6 @@ def test_protocols() -> None:
     b = MpvIpcBackend([sys.executable, str(FAKE_MPV)])
     assert isinstance(b, AudioBackend)
     assert isinstance(b, QueueingAudioBackend)
-    assert MpvAudioBackend is MpvIpcBackend
     b.close()  # cerrar sin haber arrancado no falla
 
 
@@ -168,6 +166,50 @@ def test_skip_emits_skipped_and_advances(
     assert next_event(rec) == Started(short, datetime(2026, 1, 1, tzinfo=UTC))
     wait_until(lambda: len(rec.events) == 4)
     assert summary(rec.events)[-1] == ("end", "short.wav", "eof")
+
+
+def test_clear_pending_keeps_current_and_drops_the_rest(
+    backend: MpvIpcBackend, rec: EventRecorder, tmp_path: Path
+) -> None:
+    a = make_wav(tmp_path / "a.wav", 0.3)
+    b = make_wav(tmp_path / "b.wav", 0.1)
+    c = make_wav(tmp_path / "c.wav", 0.1)
+    for f in (a, b, c):
+        backend.enqueue(f)
+    assert next_event(rec) == Started(a, datetime(2026, 1, 1, tzinfo=UTC))
+    assert backend.clear_pending() == 2
+    assert backend.queued() == 0 and backend.current() == a
+    assert summary([next_event(rec)]) == [("end", "a.wav", "eof")]
+    wait_until(backend.idle)
+    # Tras vaciar, la cola sigue funcionando (y la correspondencia FIFO se mantiene)
+    d = make_wav(tmp_path / "d.wav", 0.1)
+    backend.enqueue(d)
+    wait_until(lambda: len(rec.events) == 4)
+    assert summary(rec.events) == [
+        ("start", "a.wav", ""), ("end", "a.wav", "eof"),
+        ("start", "d.wav", ""), ("end", "d.wav", "eof"),
+    ]
+    assert backend.clear_pending() == 0
+
+
+def test_clear_pending_then_skip_gives_way_to_interrupt(
+    backend: MpvIpcBackend, rec: EventRecorder, tmp_path: Path
+) -> None:
+    """Lo que hace la emisora al saltar la señal horaria: vaciar, encolar, cortar."""
+    long = make_wav(tmp_path / "long.wav", 30)
+    queued = make_wav(tmp_path / "queued.wav", 0.1)
+    signal = make_wav(tmp_path / "signal.wav", 0.1)
+    backend.enqueue(long)
+    backend.enqueue(queued)
+    assert next_event(rec) == Started(long, datetime(2026, 1, 1, tzinfo=UTC))
+    backend.clear_pending()
+    backend.enqueue(signal)
+    backend.skip()
+    wait_until(lambda: len(rec.events) == 4)
+    assert summary(rec.events) == [
+        ("start", "long.wav", ""), ("end", "long.wav", "skipped"),
+        ("start", "signal.wav", ""), ("end", "signal.wav", "eof"),
+    ]
 
 
 def test_skip_last_file_unblocks_play(backend: MpvIpcBackend, tmp_path: Path) -> None:

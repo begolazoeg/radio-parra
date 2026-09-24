@@ -131,6 +131,7 @@ class MpvIpcBackend:
     - ``enqueue(path)``: añade a la playlist de mpv (``append-play``).
     - ``play(path)``: ``enqueue`` + bloquear hasta que ese archivo termine.
     - ``skip()``: corta el archivo en curso (``playlist-next force``).
+    - ``clear_pending()``: descarta lo encolado que no ha empezado (``playlist-clear``).
     - ``add_listener(cb)`` / ``remove_listener(cb)``: eventos ``Started``/``Ended``.
     - ``queued()``, ``current()``, ``alive()``, ``idle()``, ``restarts``.
     - ``mpv_playlist()``: playlist tal y como la ve mpv (diagnóstico).
@@ -304,6 +305,28 @@ class MpvIpcBackend:
             if self._current is None or not self._connected:
                 return
             self._send_locked(["playlist-next", "force"])
+
+    def clear_pending(self) -> int:
+        """
+        Descarta los archivos pendientes (sin eventos) y devuelve cuántos eran.
+
+        Con un archivo sonando se usa ``playlist-clear`` (mpv conserva el actual y
+        borra el resto, también las entradas ya terminadas que quedaban delante). Sin
+        nada sonando se usa ``stop``, que vacía la playlist. Los ``play()`` que
+        esperaban a un pendiente descartado vuelven.
+        """
+        with self._cond:
+            n = len(self._pending)
+            if n == 0:
+                return 0
+            if self._connected:
+                self._send_locked(["playlist-clear" if self._current is not None else "stop"])
+                self._finished_in_playlist = 0
+            for item in self._pending:
+                item.done = True
+            self._pending.clear()
+            self._cond.notify_all()
+            return n
 
     def add_listener(self, listener: EventListener) -> None:
         self._listeners.add(listener)

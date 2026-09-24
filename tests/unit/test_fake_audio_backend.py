@@ -111,3 +111,25 @@ def test_null_backend_still_records_calls() -> None:
     null.enqueue(B)
     null.skip()
     assert [c["action"] for c in null.calls] == ["play", "enqueue", "skip"]
+
+
+def test_clear_pending_keeps_current() -> None:
+    _, audio, rec = setup()
+    for p in (A, B, C):
+        audio.enqueue(p)
+    assert audio.clear_pending() == 2
+    assert audio.current() == A and audio.queued() == 0
+    audio.finish()
+    assert rec.events == [Started(A, at(0)), Ended(A, at(10), "eof")]
+
+
+def test_finish_advances_only_what_is_left() -> None:
+    clock, audio, rec = setup()
+    audio.enqueue(C)                     # 30 s
+    assert audio.time_left() == 30.0
+    clock.advance(12)                    # alguien mueve el reloj a mitad (temporizador)
+    assert audio.time_left() == 18.0
+    audio.finish()
+    assert clock.now() == at(30)
+    assert rec.events[-1] == Ended(C, at(30), "eof")
+    assert audio.time_left() is None

@@ -7,8 +7,10 @@ el tiempo solo avanza cuando alguien llama a ``finish()`` (o a ``play()``, que
 termina todo lo que haya hasta ese archivo).
 
 Con ``duration_of`` y ``advance`` (p. ej. ``FakeClock.advance``), cada archivo que
-termina con ``eof`` avanza el reloj su duración, de modo que las marcas de tiempo de
-los eventos quedan en tiempo simulado::
+termina con ``eof`` avanza el reloj **lo que le queda** de su duración (su duración
+menos lo que ya haya avanzado el reloj desde que empezó), de modo que las marcas de
+tiempo de los eventos quedan en tiempo simulado aunque alguien mueva el reloj a mitad
+de un archivo (p. ej. la simulación, para disparar un temporizador)::
 
     clock = FakeClock(start)
     audio = FakeEventBackend(clock, duration_of=lambda p: durations[p], advance=clock.advance)
@@ -22,6 +24,7 @@ from __future__ import annotations
 import itertools
 from collections import deque
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 from radio.core.clock import Clock
@@ -42,6 +45,8 @@ class FakeEventBackend:
     - ``enqueue(path)``: al final de la cola; si no suena nada, empieza (``Started``).
     - ``finish(reason="eof")``: termina el archivo en curso y empieza el siguiente.
     - ``skip()``: ``finish("skipped")`` si hay algo sonando.
+    - ``clear_pending()``: descarta los pendientes (sin eventos); el actual sigue.
+    - ``time_left()``: segundos que le quedan al archivo en curso (con ``duration_of``).
     - ``play(path)``: encola y termina (``eof``) todo hasta ese archivo, incluido.
     - ``crash()``: simula que el reproductor muere y el watchdog lo relanza: el archivo
       en curso termina con ``error``, ``restarts`` sube y sigue el siguiente pendiente.
@@ -63,6 +68,7 @@ class FakeEventBackend:
         self._listeners = ListenerSet()
         self._pending: deque[tuple[int, Path]] = deque()
         self._current: tuple[int, Path] | None = None
+        self._current_since: datetime | None = None
         self._tokens = itertools.count()
         self._restarts = 0
         self._closed = False
@@ -99,8 +105,10 @@ class FakeEventBackend:
         if self._current is None:
             return
         _, path = self._current
-        if reason == "eof" and self._duration_of is not None and self._advance is not None:
-            self._advance(self._duration_of(path))
+        if reason == "eof" and self._advance is not None:
+            left = self.time_left()
+            if left:
+                self._advance(left)
         self._current = None
         events: list[PlayerEvent] = [Ended(path, self._clock.now(), reason)]
         events += self._start_next()
@@ -132,6 +140,19 @@ class FakeEventBackend:
     def queued(self) -> int:
         return len(self._pending)
 
+    def clear_pending(self) -> int:
+        n = len(self._pending)
+        self._pending.clear()
+        self.calls.append({"action": "clear_pending", "n": n})
+        return n
+
+    def time_left(self) -> float | None:
+        """Segundos que le quedan al archivo en curso; ``None`` si no suena nada o no se sabe."""
+        if self._current is None or self._duration_of is None or self._current_since is None:
+            return None
+        elapsed = (self._clock.now() - self._current_since).total_seconds()
+        return max(0.0, self._duration_of(self._current[1]) - elapsed)
+
     def current(self) -> Path | None:
         return self._current[1] if self._current is not None else None
 
@@ -161,7 +182,8 @@ class FakeEventBackend:
         if self._current is not None or not self._pending:
             return []
         self._current = self._pending.popleft()
-        return [Started(self._current[1], self._clock.now())]
+        self._current_since = self._clock.now()
+        return [Started(self._current[1], self._current_since)]
 
     def _emit(self, events: list[PlayerEvent]) -> None:
         self._listeners.emit(events)
