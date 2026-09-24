@@ -252,6 +252,17 @@ def simulate(
     hours: float = typer.Option(24.0, "--hours", help="Horas de emisión simuladas"),
     seed: int = typer.Option(1, "--seed", help="Semilla (misma semilla → mismo informe)"),
     json_out: bool = typer.Option(False, "--json", help="Informe en JSON"),
+    timeline: bool = typer.Option(
+        False, "--timeline", help="Imprime la línea de tiempo: una línea por archivo emitido"
+    ),
+    catalog: str = typer.Option(
+        "default", "--catalog",
+        help="Música sintética: default (canciones de 150–600 s) o tinydesk (conciertos de 15–30 min)",
+    ),
+    mode: str = typer.Option("default", "--mode", help="Modo de la parrilla (grid.yaml)"),
+    talk_stock: bool = typer.Option(
+        False, "--talk-stock", help="Añade stock sintético de palabra e intros (afinar grid.yaml)"
+    ),
     config_dir: Path = typer.Option(  # noqa: B008
         Path("config"), "--config-dir", help="Directorio de configuración"
     ),
@@ -263,19 +274,28 @@ def simulate(
     ),
 ) -> None:
     """
-    Simula N horas de emisión en memoria (reloj falso, sin audio) y comprueba invariantes.
+    Simula N horas de emisión con el motor de la emisora (reloj falso, sin audio ni red)
+    y comprueba los invariantes. Sale con código 1 si alguno falla.
     """
     from datetime import datetime  # noqa: PLC0415
 
     from radio.core.config import RadioConfig  # noqa: PLC0415
-    from radio.sim import SIM_START, run_simulation  # noqa: PLC0415
+    from radio.sim import CATALOGS, SIM_START, run_simulation  # noqa: PLC0415
 
+    if catalog not in CATALOGS:
+        typer.echo(f"Catálogo desconocido {catalog!r} (disponibles: {', '.join(CATALOGS)})",
+                   err=True)
+        raise typer.Exit(2)
     config = RadioConfig.load(config_dir)
     start_dt = datetime.fromisoformat(start) if start else SIM_START
     report = run_simulation(
-        hours=hours, seed=seed, config=config, prompts_dir=prompts_dir, start=start_dt
+        hours=hours, seed=seed, config=config, prompts_dir=prompts_dir, start=start_dt,
+        mode=mode, talk_stock=talk_stock, catalog=catalog,  # type: ignore[arg-type]
     )
-    typer.echo(report.to_json() if json_out else report.to_text())
+    if json_out:
+        typer.echo(report.to_json(timeline=timeline))
+    else:
+        typer.echo(report.to_text(timeline=timeline))
     if not report.passed:
         raise typer.Exit(1)
 
@@ -285,29 +305,30 @@ def station(
     config_dir: Path = typer.Option(  # noqa: B008
         Path("config"), "--config-dir", help="Directorio de configuración"
     ),
-    data_dir: Path = typer.Option(  # noqa: B008
-        Path("data"), "--data-dir", help="Directorio de datos (state.db, stock/, tmp/)"
+    data_dir: Path | None = typer.Option(  # noqa: B008
+        None, "--data-dir", help="Directorio de datos (por defecto station.yaml → data_dir)"
     ),
-    prompts_dir: Path = typer.Option(  # noqa: B008
-        Path("prompts"), "--prompts-dir", help="Directorio de plantillas de prompts"
+    emergency_dir: Path | None = typer.Option(  # noqa: B008
+        None, "--emergency-dir",
+        help="Audios de emergencia (por defecto station.yaml → playout.emergency_dir)",
     ),
-    emergency_dir: Path = typer.Option(  # noqa: B008
-        Path("assets/emergency"), "--emergency-dir", help="Audios de emergencia"
-    ),
+    mode: str = typer.Option("default", "--mode", help="Modo de la parrilla (grid.yaml)"),
 ) -> None:
     """
     Arranca la emisora real (mpv + reloj del sistema) hasta Ctrl+C / SIGTERM.
+
+    Solo programa y reproduce desde disco: no produce ni usa la red (invariante 2).
+    El stock lo rellena `radio produce --all` (deploy/radio-produce.timer).
     """
     import logging  # noqa: PLC0415
 
-    from radio.station import run_station  # noqa: PLC0415
+    from radio.station.service import run_station  # noqa: PLC0415
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
-    run_station(
-        config_dir=config_dir,
-        data_dir=data_dir,
-        prompts_dir=prompts_dir,
-        emergency_dir=emergency_dir,
+    code = run_station(
+        config_dir=config_dir, data_dir=data_dir, emergency_dir=emergency_dir, mode=mode
     )
+    if code:
+        raise typer.Exit(code)

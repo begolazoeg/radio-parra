@@ -19,7 +19,6 @@ from radio.producers.post import AudioPost, FfmpegLoudnorm, NullPost, choose_pos
 from radio.producers.registry import PRODUCERS, build_producer, build_producers
 from radio.producers.runner import (
     ProduceReport,
-    ProducerRunner,
     RunResult,
     build_context,
     produce,
@@ -39,7 +38,6 @@ __all__ = [
     "Producer",
     "ProducerContext",
     "ProducerError",
-    "ProducerRunner",
     "RunResult",
     "RunStats",
     "StagedProducer",

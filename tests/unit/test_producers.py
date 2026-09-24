@@ -26,7 +26,6 @@ from radio.producers import (
     MusicTinyDeskProducer,
     NullPost,
     ProducerContext,
-    ProducerRunner,
     StagedProducer,
     TimeSignalProducer,
     build_producer,
@@ -523,27 +522,6 @@ def test_produce_with_registry_time_signal(tmp_path: Path) -> None:
     run = ctx.db.last_producer_run("time_signal")
     assert run is not None and run.n_segments == 2 and run.tts_chars > 0
     assert produce(ctx).results == []
-
-
-def test_producer_runner_tick_is_cron_only(tmp_path: Path) -> None:
-    cfg = make_config(
-        a=ProducerSettings(active=True, cron="*/30 * * * *"),
-        b=ProducerSettings(active=False, cron="* * * * *"),
-        manual=ProducerSettings(active=True, cron=None),
-        every=ProducerSettings(active=True, cron="* * * * *"),
-    )
-    ctx = make_ctx(tmp_path, config=cfg)
-    a, b, manual, every = (DummyProducer(n, deficit=1) for n in ("a", "b", "manual", "every"))
-    runner = ProducerRunner(ctx, [a, b, manual, every])
-    assert {p.name for p in runner.due()} == {"a", "every"}
-    assert runner.tick() == {"a": ["a-1"], "every": ["every-1"]}
-    assert runner.due() == []
-    assert isinstance(ctx.clock, FakeClock)
-    ctx.clock.advance(60)
-    assert {p.name for p in runner.due()} == {"every"}
-    ctx.clock.advance(9 * 60)       # 16:30 → dispara */30
-    assert {p.name for p in runner.due()} == {"a", "every"}
-    assert b.runs == 0 and manual.runs == 0
 
 
 # ── Señal horaria ─────────────────────────────────────────────────────────────

@@ -31,6 +31,36 @@ class BudgetConfig(BaseModel):
     monthly_eur: float = Field(default=10.0, ge=0.0)
 
 
+class AudioConfig(BaseModel):
+    """Salida de audio de la emisora (§10: lo único que cambia entre portátil y Pi)."""
+    model_config = ConfigDict(extra="forbid")
+
+    mpv_bin: str = "mpv"
+    # Argumentos extra para mpv, p. ej. ["--audio-device=alsa/plughw:CARD=Device"]
+    mpv_args: list[str] = Field(default_factory=list)
+
+
+class InterruptsConfig(BaseModel):
+    """Cómo da paso la emisora a una interrupción de la parrilla (señal horaria)."""
+    model_config = ConfigDict(extra="forbid")
+
+    # True: se corta la música en curso a la hora exacta (§4.3: "la emisora puede
+    # cortar lo que suene"). False: la interrupción espera a que acabe el archivo en
+    # curso (si así llega tarde, más allá de max_late_seconds, se omite).
+    cut_music: StrictBool = True
+
+
+class PlayoutConfig(BaseModel):
+    """Cola de la emisora (§4.4) y bucle de emergencia (§8, peldaño 5)."""
+    model_config = ConfigDict(extra="forbid")
+
+    # Unidades encoladas por detrás de lo que suena (§4.4: lookahead de 2-3)
+    lookahead_units: int = Field(default=2, ge=1, le=5)
+    emergency_dir: str = "assets/emergency"
+    # Segundos hasta volver a intentar programar tras caer al peldaño 5
+    emergency_retry_s: float = Field(default=30.0, gt=0)
+
+
 class StationConfig(BaseModel):
     """Configuración global de la emisora (station.yaml)."""
     model_config = ConfigDict(extra="forbid")
@@ -42,6 +72,9 @@ class StationConfig(BaseModel):
     budget: BudgetConfig = BudgetConfig()
     loudness_lufs: float = -16.0
     providers: dict[str, ProviderSettings] = Field(default_factory=dict)
+    audio: AudioConfig = AudioConfig()
+    interrupts: InterruptsConfig = InterruptsConfig()
+    playout: PlayoutConfig = PlayoutConfig()
 
 
 # ── Parrilla (grid.yaml, §5) ──────────────────────────────────────────────────

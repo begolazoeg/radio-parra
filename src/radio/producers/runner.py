@@ -22,8 +22,8 @@ Regla de gasto (§4.2): antes de producir, si el gasto del mes ya alcanza
 ``budget.monthly_eur``, el productor (si ``billable``) se salta y se registra una
 ejecución ``ok=False`` con error "presupuesto agotado".
 
-``ProducerRunner`` se conserva para el bucle provisional de la emisora y de la
-simulación (solo ``cron``); desaparecerá cuando la emisora deje de producir.
+La emisora nunca ejecuta productores (invariante 2): ``radio simulate`` modela el
+timer llamando a ``produce`` cada 15 min de tiempo simulado.
 """
 
 from __future__ import annotations
@@ -268,35 +268,3 @@ def build_context(
         prompts_dir=prompts_dir,
         post=post if post is not None else choose_post(config),
     )
-
-
-# ── Runner provisional de la emisora / simulación ─────────────────────────────
-
-class ProducerRunner:
-    """
-    Ejecuta los productores activos cuyo ``cron`` ha disparado (bucle de la emisora
-    y simulación de Fase 1). Provisional: la emisora dejará de producir (inv. 2).
-    """
-
-    def __init__(self, ctx: ProducerContext, producers: Sequence[Producer]) -> None:
-        self.ctx = ctx
-        self.producers = list(producers)
-
-    def _is_due(self, producer: Producer, now: datetime) -> bool:
-        settings = self.ctx.config.producers.get(producer.name)
-        if settings is None or not settings.active:
-            return False
-        return _cron_is_due(self.ctx, producer.name, now)
-
-    def due(self) -> list[Producer]:
-        """Productores que deben ejecutarse ahora."""
-        now = _local_now(self.ctx)
-        return [p for p in self.producers if self._is_due(p, now)]
-
-    def tick(self) -> dict[str, list[str]]:
-        """Ejecuta los que tocan. Devuelve nombre → ids creados (vacío si falla)."""
-        results: dict[str, list[str]] = {}
-        for producer in self.due():
-            result = run_producer(self.ctx, producer, reason="cron")
-            results[producer.name] = list(result.segment_ids)
-        return results

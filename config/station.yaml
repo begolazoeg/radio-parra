@@ -24,3 +24,22 @@ providers:
     model: "claude-haiku-4-5-20251001"
   tts:
     name: "elevenlabs"
+
+# ── Emisora (radio station, §4.4) ─────────────────────────────────────────────
+# Salida de audio: lo único que cambia entre el portátil y la Pi (§1 inv. 10).
+audio:
+  mpv_bin: "mpv"
+  mpv_args: []               # p. ej. ["--audio-device=alsa/plughw:CARD=sndrpihifiberry"]
+
+# Interrupciones de la parrilla (señal horaria, grid.yaml → interrupts)
+interrupts:
+  # true: a la hora exacta se corta la música en curso (cortar un concierto es dejar
+  # de reproducirlo, no modificar el archivo; ver ADR 0002).
+  # false: la interrupción espera a que acabe lo que suena; si así llega más tarde
+  # que max_late_seconds, se omite.
+  cut_music: true
+
+playout:
+  lookahead_units: 2         # unidades en cola por detrás de lo que suena
+  emergency_dir: "assets/emergency"
+  emergency_retry_s: 30      # tras el peldaño 5, reintento de programación

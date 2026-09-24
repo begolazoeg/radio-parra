@@ -657,7 +657,3 @@ class MpvIpcBackend:
                 return False
             log.warning("mpv relanzado (reinicio nº %d, pid %s)", self._restarts, proc.pid)
             return True
-
-
-# Nombre histórico (Fase 1): station.py lo importa así.
-MpvAudioBackend = MpvIpcBackend

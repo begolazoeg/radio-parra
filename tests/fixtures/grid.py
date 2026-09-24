@@ -161,7 +161,7 @@ def run_pure(grid: GridConfig, segments: Iterable[Segment], start: datetime, hou
              seed: int, mode: str = "default", signals: bool = True) -> PureRun:
     """
     Emite ``hours`` horas desde ``start`` sin BD: pide unidades, las "emite" (el reloj
-    avanza su duración), retira la palabra (como el playout) y añade señales horarias.
+    avanza su duración), retira la palabra (como la emisora) y añade señales horarias.
     """
     rng = random.Random(seed)
     pool = {s.id: s for s in segments}

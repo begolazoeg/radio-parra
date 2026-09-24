@@ -114,3 +114,42 @@ def test_cli_simulate_json() -> None:
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert data["passed"] is True and data["seed"] == 3
+
+
+def test_tinydesk_catalog_default_mode_keeps_signals_on_time() -> None:
+    """Conciertos de 15–30 min en el modo default: la señal horaria sigue en punto."""
+    r = simulate(hours=24, seed=1, catalog="tinydesk")
+    assert r.passed, r.failures
+    assert r.catalog == "tinydesk"
+    assert r.time_signals_aired >= 23 and r.time_signals_on_time == r.time_signals_aired
+    assert r.interrupts >= 0 and r.music_cuts <= r.interrupts
+    assert r.airtime_s["jingle"] < 0.05 * 24 * 3600      # sin cadenas de jingles de relleno
+
+
+def test_sim_runs_through_the_station_engine(report_24h: SimReport) -> None:
+    """Misma lógica que la emisora: la línea de tiempo sale de los eventos del motor."""
+    assert len(report_24h.timeline) == report_24h.segments_aired
+    assert report_24h.units_aired == sum(
+        v for k, v in report_24h.rung_histogram.items() if k != "5"
+    )
+    assert isinstance(report_24h.interrupts, int) and isinstance(report_24h.music_cuts, int)
+
+
+def test_unknown_catalog_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        simulate(hours=1, catalog="vinilos")  # type: ignore[arg-type]
+    result = CliRunner().invoke(app, ["simulate", "--catalog", "vinilos",
+                                      "--config-dir", str(REPO / "config")])
+    assert result.exit_code == 2
+
+
+def test_cli_simulate_json_with_timeline() -> None:
+    result = CliRunner().invoke(
+        app,
+        ["simulate", "--hours", "1", "--seed", "3", "--json", "--timeline", "--catalog",
+         "tinydesk", "--config-dir", str(REPO / "config"), "--prompts-dir", str(REPO / "prompts")],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["catalog"] == "tinydesk" and data["timeline"]
+    assert {"interrupts", "music_cuts"} <= set(data)
