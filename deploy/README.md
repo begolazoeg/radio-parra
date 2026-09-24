@@ -5,7 +5,10 @@ Unidades systemd de ejemplo para la Raspberry Pi (ARCHITECTURE.md §10).
 | Archivo                 | Qué es                                                     |
 |-------------------------|------------------------------------------------------------|
 | `radio-station.service` | La emisora (`radio station`): `Type=simple`, `Restart=always`. |
-| `radio-produce.service` + `radio-produce.timer` | Jobs de producción. **Los aporta otro componente** (productores); no están aún en esta carpeta. |
+| `radio-produce.service` + `radio-produce.timer` | Jobs de producción (`radio produce --all`) cada 15 min. `Type=oneshot`, baja prioridad. |
+
+Son los dos mundos de ARCHITECTURE.md §2: la emisora **no** produce ni usa la red
+(invariante 2); el timer rellena el stock en `data/` y la emisora lo lee.
 
 ## Instalación de la emisora
 
@@ -33,9 +36,23 @@ systemctl status radio-station
 journalctl -u radio-station -f
 ```
 
-Cuando existan `radio-produce.service`/`.timer`, se instalan igual (copiar a
-`/etc/systemd/system/`, `daemon-reload`) y se activa **el timer**:
-`sudo systemctl enable --now radio-produce.timer`.
+## Instalación de la producción
+
+`radio-produce.service` es un ejemplo con marcadores: sustituye `<RADIO_DIR>` (p. ej.
+`/opt/radio-parra`) y `<UV>` (ruta de `uv`) antes de copiarlo. Se activa **el timer**,
+no el servicio:
+
+```bash
+sudo cp deploy/radio-produce.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now radio-produce.timer
+systemctl list-timers radio-produce.timer
+journalctl -u radio-produce.service     # una entrada por pasada
+```
+
+La primera pasada con red descarga episodios de Tiny Desk (`music_tinydesk`, hasta
+`max_per_run` por pasada); hasta entonces la emisora suena con el bucle de emergencia.
+`radio stock` muestra el stock frente a su objetivo.
 
 ## Notas
 
@@ -47,7 +64,13 @@ Cuando existan `radio-produce.service`/`.timer`, se instalan igual (copiar a
   relanza mpv si muere. Si no hay nada que emitir suena
   `assets/emergency/emergency_loop.wav`.
 - **Audio:** un servicio de sistema no tiene sesión de PulseAudio/PipeWire; mpv sale
-  por ALSA con el dispositivo por defecto (configurable en `/etc/asound.conf` o con
-  un `~radio/.config/mpv/mpv.conf` con `ao=alsa` y `audio-device=...`). El usuario
+  por ALSA con el dispositivo por defecto. El dispositivo se elige en
+  `config/station.yaml → audio.mpv_args` (p. ej.
+  `["--ao=alsa", "--audio-device=alsa/plughw:CARD=sndrpihifiberry"]`; `mpv
+  --audio-device=help` lista los disponibles) o en `/etc/asound.conf`. El usuario
   `radio` debe estar en el grupo `audio`.
-- `radio doctor` comprueba que `mpv` y `ffmpeg` están instalados.
+- **Señal horaria:** con `station.yaml → interrupts.cut_music: true` (por defecto) la
+  emisora corta la canción en curso a la hora en punto; con `false` espera a que acabe
+  (y si llegaría tarde, la omite).
+- `radio doctor` comprueba mpv, ffmpeg, permisos y espacio de `data/`, el esquema de
+  `state.db`, el bucle de emergencia, el feed y los productores activos.

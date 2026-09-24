@@ -7,7 +7,10 @@
 > (§3.2), los estados `done`/`error` pasan a `retired`/`quarantined`, la BD es
 > `data/state.db` y el audio va a `data/stock/<kind>/`. El producer `host_intro` descrito
 > aquí se ha retirado hasta la Fase 2 (se rehará con grounding) y los producers se
-> programan por `cron` en lugar de `interval_minutes`. Ver ADR 0002.
+> programan por `cron` en lugar de `interval_minutes`. El scheduler `next_kind`, el
+> playout bloqueante (`core/playout.py`) y los producers dentro de la emisora
+> (`ProducerRunner`) ya no existen: los sustituyen `grid.next_unit`, el motor con cola
+> de `radio.station` y el timer de `radio produce` (invariante 2). Ver ADR 0002.
 
 ## Contexto
 

@@ -22,6 +22,7 @@ Audio fijo de la emisora, versionado en git (ARCHITECTURE.md §10: entra en los 
 - **Garantía en CI:** `tests/unit/test_emergency_asset.py` falla si el archivo falta,
   no es un WAV válido o su duración se sale de 20–30 s.
 
-La emisora (`Playout`) reproduce, rotando, cualquier audio de `emergency/` cuando no
-hay nada más que emitir. Se pueden añadir más archivos aquí (con su licencia anotada
+La emisora (`radio.station`, peldaño 5 de §8) reproduce, rotando, cualquier audio de
+`emergency/` (`station.yaml → playout.emergency_dir`) cuando no hay nada más que
+emitir, y lo registra en `play_log` con kind `emergency`. Se pueden añadir más archivos aquí (con su licencia anotada
 en este README).
