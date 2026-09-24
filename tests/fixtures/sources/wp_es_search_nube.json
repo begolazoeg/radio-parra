@@ -1,0 +1,42 @@
+{
+  "_comment": "Respuesta sintética con la forma real de la API; 'Nube Ferrán' es una artista ficticia y ningún id ni texto corresponde a nada real.",
+  "batchcomplete": "",
+  "continue": {
+    "sroffset": 5,
+    "continue": "-||"
+  },
+  "query": {
+    "searchinfo": {
+      "totalhits": 3
+    },
+    "search": [
+      {
+        "ns": 0,
+        "title": "Faro de Niebla",
+        "pageid": 99900020,
+        "size": 2100,
+        "wordcount": 300,
+        "snippet": "álbum de <span class=\"searchmatch\">Nube</span>",
+        "timestamp": "2026-07-01T00:00:00Z"
+      },
+      {
+        "ns": 0,
+        "title": "Nube Ferrán (futbolista)",
+        "pageid": 99900021,
+        "size": 1500,
+        "wordcount": 200,
+        "snippet": "futbolista ficticia",
+        "timestamp": "2026-07-01T00:00:00Z"
+      },
+      {
+        "ns": 0,
+        "title": "Nube Ferrán",
+        "pageid": 99900013,
+        "size": 400,
+        "wordcount": 30,
+        "snippet": "puede referirse a",
+        "timestamp": "2026-07-01T00:00:00Z"
+      }
+    ]
+  }
+}
