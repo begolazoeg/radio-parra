@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Feed de prueba con estructura de podcast (RSS 2.0 + iTunes). Hosts ficticios
+     (.invalid, RFC 2606): no corresponde a ningún feed real. La URL real del feed
+     es la decisión abierta #8. -->
+<rss version="2.0"
+     xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+     xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Conciertos de escritorio (fixture)</title>
+    <link>https://podcast.fixture.invalid/</link>
+    <description>Feed de prueba para Radio Parra.</description>
+    <language>en-us</language>
+    <itunes:author>Fixture Radio</itunes:author>
+    <itunes:explicit>false</itunes:explicit>
+
+    <item>
+      <title>Banda Vieja: Tiny Desk Concert</title>
+      <guid isPermaLink="false">fixture-guid-001</guid>
+      <pubDate>Mon, 01 Jun 2026 10:00:00 GMT</pubDate>
+      <link>https://podcast.fixture.invalid/episodes/banda-vieja</link>
+      <description>El concierto más antiguo del feed.</description>
+      <itunes:duration>1200</itunes:duration>
+      <enclosure url="https://media.fixture.invalid/audio/banda-vieja.wav" length="16044" type="audio/wav"/>
+    </item>
+
+    <item>
+      <title>Rosalía: Tiny Desk (Home) Concert</title>
+      <guid isPermaLink="false">fixture-guid-004</guid>
+      <pubDate>Thu, 10 Sep 2026 14:00:00 GMT</pubDate>
+      <link>https://podcast.fixture.invalid/episodes/rosalia</link>
+      <description><![CDATA[<p>Rosalía toca <b>tres canciones</b> desde casa &amp; con amigos.</p><p>Setlist: <i>Uno</i>, <i>Dos</i>.</p>]]></description>
+      <itunes:duration>900</itunes:duration>
+      <enclosure url="https://media.fixture.invalid/audio/rosalia" length="16044" type="audio/x-wav"/>
+    </item>
+
+    <item>
+      <title>Vídeo sin audio: Tiny Desk Concert</title>
+      <guid isPermaLink="false">fixture-guid-video</guid>
+      <pubDate>Sat, 12 Sep 2026 09:00:00 GMT</pubDate>
+      <link>https://podcast.fixture.invalid/episodes/video</link>
+      <description>Solo tiene enclosure de vídeo.</description>
+      <enclosure url="https://media.fixture.invalid/video/only.mp4" length="999999" type="video/mp4"/>
+    </item>
+
+    <item>
+      <title>Anderson .Paak &amp; The Free Nationals: Tiny Desk Concert</title>
+      <guid isPermaLink="false">fixture-guid-005</guid>
+      <pubDate>Mon, 21 Sep 2026 12:00:00 GMT</pubDate>
+      <link>https://podcast.fixture.invalid/episodes/anderson-paak</link>
+      <description>Funk en la oficina.</description>
+      <itunes:duration>1500</itunes:duration>
+      <enclosure url="https://media.fixture.invalid/audio/anderson-paak.wav?source=rss" length="16044" type="audio/wav"/>
+    </item>
+
+    <item>
+      <title>Nota de la redacción</title>
+      <guid isPermaLink="false">fixture-guid-text</guid>
+      <pubDate>Tue, 22 Sep 2026 08:00:00 GMT</pubDate>
+      <link>https://podcast.fixture.invalid/episodes/nota</link>
+      <description>Entrada sin enclosure.</description>
+    </item>
+
+    <item>
+      <title>Enlace roto: Tiny Desk Concert</title>
+      <guid isPermaLink="false">fixture-guid-html</guid>
+      <pubDate>Wed, 16 Sep 2026 12:00:00 GMT</pubDate>
+      <link>https://podcast.fixture.invalid/episodes/roto</link>
+      <description>El servidor devuelve una página HTML en vez de audio.</description>
+      <enclosure url="https://media.fixture.invalid/audio/roto.wav" length="16044" type="audio/wav"/>
+    </item>
+
+    <item>
+      <title>Sessions: Mon Laferte</title>
+      <guid isPermaLink="false">fixture-guid-003</guid>
+      <pubDate>Mon, 03 Aug 2026 12:00:00 GMT</pubDate>
+      <link>https://podcast.fixture.invalid/episodes/mon-laferte</link>
+      <description>Título sin el patrón de Tiny Desk.</description>
+      <enclosure url="https://media.fixture.invalid/audio/mon-laferte.wav" length="16044" type="audio/wav"/>
+    </item>
+  </channel>
+</rss>

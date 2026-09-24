@@ -30,13 +30,26 @@ make lint    # ruff + mypy
 
 ```bash
 uv run radio doctor                         # diagnóstico del entorno
-uv run radio import-music ~/Musica/TinyDesk # importa audios locales como música "ready"
+uv run radio produce --all                  # rellena stock (job; lo lanza el timer de systemd)
+uv run radio produce music_tinydesk         # un productor concreto (añade --dry-run para ver qué haría)
 uv run radio stock                          # stock por kind frente a su objetivo y caducidades
+uv run radio import-music ~/Musica/TinyDesk # SOLO DESARROLLO: audios locales como música "ready"
 uv run radio simulate --hours 24 --seed 1   # simulación acelerada (añade --json)
 uv run radio station                        # emisora real (mpv); Ctrl+C para parar
 ```
 
-- **`import-music DIR [--db data/state.db]`**: recorre `DIR` de forma recursiva, lee
+- **`produce [NAME] [--all] [--dry-run] [--config-dir config] [--data-dir data]`**:
+  ejecuta productores como job puntual, fuera de la emisora (invariante 2). Con un
+  nombre, ese productor (aunque esté inactivo). Con `--all`, los activos de
+  `producers.yaml` cuyo `cron` haya disparado desde su última ejecución **o** que
+  tengan déficit de stock. Cada ejecución queda en `producer_runs` (segmentos,
+  caracteres de TTS, coste, error); un fallo no afecta a los demás productores ni al
+  stock existente. Regla de gasto: si el gasto del mes alcanza `budget.monthly_eur`,
+  los productores de pago se saltan con el error "presupuesto agotado". Sale con
+  código 1 si alguna ejecución falla. `--dry-run` solo lista qué tocaría.
+- **`import-music DIR [--db data/state.db]`** — *herramienta de desarrollo/offline*:
+  sirve para probar la emisora sin red con audios que ya tienes. En la radio real la
+  música entra **solo** por el feed RSS oficial (§7, productor `music_tinydesk`). Recorre `DIR` de forma recursiva, lee
   duración y etiquetas con mutagen (o las deduce de `Artista - Título.ext`) y registra
   cada pista como segmento `music` (en `meta`: título, artista, `source: local` y
   etiquetas `artist:<slug>` y, si la ruta menciona Tiny Desk, `source:tiny_desk`). Los
@@ -70,8 +83,29 @@ Qué hay:
   seguidas del mismo artista, al menos `horas - 1` señales horarias y ningún producer
   con error. CI ejecuta `radio simulate --hours 6 --seed 1`.
 
-Pendiente: productor `music_tinydesk`, producers factual/ficción, proveedores reales de
-LLM/TTS y producción fuera de la emisora. Decisiones en `docs/decisions/`.
+Pendiente: producers factual/ficción, proveedores reales de LLM/TTS y sacar los
+producers del bucle de la emisora. Decisiones en `docs/decisions/`.
+
+## Producción de stock (`radio produce`)
+
+- **Framework** (`producers/base.py`): protocolo `Producer` (`deficit`, `produce`) y
+  plantilla `StagedProducer` con las etapas gather → write → validate → tts → post →
+  register. `register` mueve el audio de `data/tmp/` a `data/stock/<kind>/` y solo
+  entonces inserta la fila (y el `state_delta` de ficción) en una transacción.
+- **Post** (`producers/post.py`): `ffmpeg` loudnorm en dos pasadas (objetivo
+  `station.loudness_lufs`) + recorte de silencios; sin ffmpeg, se avisa y no se toca.
+- **Registro** (`producers/registry.py`): `PRODUCERS` = nombre → fábrica.
+- **`music_tinydesk`**: lee el feed RSS oficial de `producers.yaml →
+  music_tinydesk.params.feed_url`. **La URL es la decisión abierta #8 y no tiene valor
+  por defecto**: hasta que la dueña la configure, el productor falla con
+  "feed_url no configurado (decisión abierta #8)". Solo episodios con enclosure de
+  audio, deduplicados por `guid`, del más reciente al más antiguo, descargas
+  secuenciales con `User-Agent` propio y GET condicional (ETag/Last-Modified guardados
+  en `data/cache/feeds/`). Tope de caché LRU (`max_cache_items` / `max_cache_mb`):
+  lo retirado pasa a `retired` y se borra el archivo (nunca los importados a mano).
+- **systemd**: `deploy/radio-produce.service` (oneshot, `radio produce --all`) y
+  `deploy/radio-produce.timer` (cada 15 min, `Persistent=true`). Son ejemplos: cambia
+  `<RADIO_DIR>` y `<UV>` por tus rutas.
 
 ## Datos
 
@@ -98,3 +132,10 @@ data/           # generado en runtime (en .gitignore)
 tests/          # unit + fixtures
 docs/decisions/ # ADRs
 ```
+
+## Contacto
+
+Las descargas del feed se identifican con `User-Agent: RadioParra/0.1 (+contacto en README)`.
+Es una radio casera sin ánimo de lucro que descarga, de forma secuencial y con GET
+condicional, solo el feed RSS oficial y sus audios. Para cualquier incidencia con
+estas peticiones, abre un issue en este repositorio.

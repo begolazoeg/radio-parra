@@ -1,5 +1,6 @@
 """
-Biblioteca musical local de Radio Parra (importación de audios Tiny Desk y otros).
+Música de Radio Parra: feed RSS oficial (``feed``), tope de caché (``cache``) e
+importación local solo para desarrollo (``library``).
 """
 
 from __future__ import annotations

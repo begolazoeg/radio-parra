@@ -111,7 +111,7 @@ def stock(
     from radio.core.config import RadioConfig  # noqa: PLC0415
     from radio.core.paths import db_path  # noqa: PLC0415
     from radio.core.store import DB  # noqa: PLC0415
-    from radio.producers.base import producer_kind  # noqa: PLC0415
+    from radio.producers.registry import PRODUCERS, build_producer  # noqa: PLC0415
 
     config = RadioConfig.load(config_dir)
     path = db_file or db_path(Path(config.station.data_dir))
@@ -123,10 +123,15 @@ def stock(
 
     # Objetivo por kind: suma de target_stock de los productores activos de ese kind
     targets: dict[str, int] = {}
+    unknown: list[str] = []
     for name, settings in config.producers.producers.items():
-        if settings.active:
-            kind = producer_kind(name)
-            targets[kind] = targets.get(kind, 0) + settings.target_stock
+        if not settings.active:
+            continue
+        if name not in PRODUCERS:
+            unknown.append(name)
+            continue
+        producer = build_producer(name, config)
+        targets[producer.kind] = targets.get(producer.kind, 0) + producer.target_stock
 
     with DB(path) as db:
         view = db.stock_view(now)
@@ -136,8 +141,8 @@ def stock(
     kinds = sorted(set(targets) | set(counts))
     if not kinds:
         typer.echo("No hay segmentos en el stock.")
-        return
-    typer.echo(f"{'kind':<16} {'ready':>6} {'objetivo':>9}  estados")
+    else:
+        typer.echo(f"{'kind':<16} {'ready':>6} {'objetivo':>9}  estados")
     for kind in kinds:
         ready = view.count(kind)
         target = targets.get(kind)
@@ -145,6 +150,8 @@ def stock(
         flag = " ⚠" if target is not None and ready < target else ""
         states = ", ".join(f"{st}: {n}" for st, n in sorted(counts.get(kind, {}).items()))
         typer.echo(f"{kind:<16} {ready:>6} {target_txt:>9}  {states or '-'}{flag}")
+    for name in unknown:
+        typer.echo(f"(aviso) productor activo sin implementar: {name}")
 
     typer.echo("\nPróximas caducidades:")
     if not upcoming:
@@ -153,6 +160,59 @@ def stock(
         assert seg.expires_at is not None
         when = seg.expires_at.astimezone(tz).strftime("%Y-%m-%d %H:%M")
         typer.echo(f"  {when}  {seg.kind:<14} {seg.title}")
+
+
+@app.command()
+def produce(
+    name: str | None = typer.Argument(None, help="Productor a ejecutar (producers.yaml)"),
+    all_: bool = typer.Option(
+        False, "--all", help="Todos los activos con cron pendiente o déficit (timer)"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Solo muestra qué se ejecutaría; no produce ni registra"
+    ),
+    config_dir: Path = typer.Option(  # noqa: B008
+        Path("config"), "--config-dir", help="Directorio de configuración"
+    ),
+    data_dir: Path | None = typer.Option(  # noqa: B008
+        None, "--data-dir", help="Directorio de datos (por defecto station.yaml → data_dir)"
+    ),
+    prompts_dir: Path = typer.Option(  # noqa: B008
+        Path("prompts"), "--prompts-dir", help="Directorio de plantillas de prompts"
+    ),
+) -> None:
+    """
+    Rellena huecos de stock ejecutando productores (job puntual, no la emisora).
+    Sale con código 1 si alguna ejecución falla.
+    """
+    import logging  # noqa: PLC0415
+
+    from radio.core.clock import SystemClock  # noqa: PLC0415
+    from radio.core.config import RadioConfig  # noqa: PLC0415
+    from radio.core.paths import db_path  # noqa: PLC0415
+    from radio.core.store import DB  # noqa: PLC0415
+    from radio.producers.post import NullPost  # noqa: PLC0415
+    from radio.producers.runner import build_context  # noqa: PLC0415
+    from radio.producers.runner import produce as run_produce  # noqa: PLC0415
+
+    if (name is None) == (not all_):
+        typer.echo("Indica un productor o --all (no ambos).", err=True)
+        raise typer.Exit(2)
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    config = RadioConfig.load(config_dir)
+    data = data_dir or Path(config.station.data_dir)
+    data.mkdir(parents=True, exist_ok=True)
+    with DB(db_path(data)) as db:
+        ctx = build_context(
+            config, db, SystemClock(config.station.timezone), data,
+            prompts_dir=prompts_dir, post=NullPost() if dry_run else None,
+        )
+        report = run_produce(ctx, None if all_ else [name or ""], dry_run=dry_run)
+    typer.echo(report.to_text())
+    if not report.ok:
+        raise typer.Exit(1)
 
 
 @app.command("import-music")
@@ -165,7 +225,10 @@ def import_music(
     ),
 ) -> None:
     """
-    Importa una biblioteca musical local (recursiva) como segmentos 'music' listos.
+    [Solo desarrollo/offline] Importa audios locales como segmentos 'music'.
+
+    Para probar sin red con archivos que ya tienes. En la radio real la música entra
+    solo por el feed RSS oficial (§7): usa `radio produce music_tinydesk`.
     """
     from radio.core.store import DB  # noqa: PLC0415
     from radio.music.library import import_directory  # noqa: PLC0415

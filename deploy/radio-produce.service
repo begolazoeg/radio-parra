@@ -1,0 +1,33 @@
+# Radio Parra — producción de stock (job puntual, §2 y §10 de ARCHITECTURE.md).
+#
+# Ejemplo: ajusta las rutas marcadas con <...> a tu instalación.
+#   <RADIO_DIR>  directorio del repo (config/, data/, prompts/, .env)
+#   <UV>         ruta de uv (p. ej. /home/radio/.local/bin/uv)
+#
+# Lo lanza radio-produce.timer. Ejecuta los productores activos cuyo cron ha
+# disparado o que tienen déficit de stock. Si falla (sin red, sin presupuesto...),
+# la radio sigue sonando con el stock que haya (invariante 2) y el siguiente
+# disparo del timer lo reintenta. Instalación:
+#   sudo cp deploy/radio-produce.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now radio-produce.timer
+#   journalctl -u radio-produce.service     # registro de cada ejecución
+
+[Unit]
+Description=Radio Parra: rellenar stock (radio produce --all)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=radio
+Group=radio
+WorkingDirectory=<RADIO_DIR>
+EnvironmentFile=-<RADIO_DIR>/.env
+ExecStart=<UV> run --frozen radio produce --all
+# Baja prioridad: no competir con la emisora por CPU ni disco
+Nice=10
+IOSchedulingClass=idle
+# Un job colgado (p. ej. una descarga eterna) no bloquea los siguientes
+TimeoutStartSec=45min
+
+# Sin [Install]: se habilita solo el timer.

@@ -1,16 +1,30 @@
 # Productores (§5 de ARCHITECTURE.md): activo, target_stock, cron y parámetros.
-# cron: 5 campos en hora local de la emisora; sin cron = solo `radio produce` manual.
+#
+# Se ejecutan como jobs con `radio produce NAME` o `radio produce --all` (timer de
+# systemd cada 15 min, deploy/radio-produce.timer). Con --all corre cada productor
+# activo cuyo `cron` haya disparado desde su última ejecución O que tenga déficit
+# (menos segmentos `ready` que `target_stock`).
+# cron: 5 campos en hora local de la emisora; sin cron = solo por déficit o a mano.
 producers:
   time_signal:
     active: true
-    target_stock: 2
+    target_stock: 2          # horas en punto preparadas por adelantado
     cron: "*/30 * * * *"
     params: {}
 
   music_tinydesk:
     active: false
-    target_stock: 30
-    cron: "0 */6 * * *"
+    target_stock: 30         # episodios `ready` que se quieren tener
+    cron: "0 */6 * * *"      # busca episodios nuevos aunque el stock esté lleno
     params:
-      feed_url: null        # decisión abierta #8: la aporta la dueña
-      max_cache_items: 60
+      # Decisión abierta #8: URL del feed RSS oficial de audio. La aporta la dueña
+      # tras verificar la URL y los términos de uso. Sin ella el productor falla
+      # con "feed_url no configurado (decisión abierta #8)".
+      feed_url: null
+      max_cache_items: 60    # tope de episodios descargados (LRU); >= target_stock
+      max_cache_mb: null     # tope en MB (null = sin tope)
+      max_per_run: 5         # descargas como mucho por ejecución (el resto, en la siguiente)
+      rotate_per_run: 1      # episodios nuevos por ejecución aunque no haya déficit
+      max_download_mb: 400   # se descarta un episodio más grande
+      download_delay_s: 1.0  # pausa entre descargas (secuenciales)
+      loudnorm: false        # normalizar con ffmpeg (recodifica: caro en una Pi)
