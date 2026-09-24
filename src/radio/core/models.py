@@ -10,6 +10,8 @@ Convenciones de ``Segment.meta`` (lo que antes eran columnas propias):
 - ``meta["script"]``: guion locutado (str).
 - ``meta["sources"]``: fuentes con las que se escribió (list[dict] con id/text/url).
 - ``meta["guid"]``: identificador externo para deduplicar (p. ej. item RSS).
+- ``meta["loudness_lufs"]`` / ``meta["true_peak_db"]``: medida de loudness del audio
+  (float o None) para la ganancia en reproducción (``radio.station.gain``).
 """
 
 from __future__ import annotations

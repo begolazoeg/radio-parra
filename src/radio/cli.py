@@ -285,6 +285,44 @@ def produce(
         raise typer.Exit(1)
 
 
+@app.command("analyze-loudness")
+def analyze_loudness(
+    kind: str = typer.Option("music", "--kind", help="Kind de los segmentos a medir"),
+    missing_only: bool = typer.Option(
+        False, "--missing-only", help="Solo los que aún no tienen meta.loudness_lufs"
+    ),
+    config_dir: Path = typer.Option(  # noqa: B008
+        Path("config"), "--config-dir", help="Directorio de configuración"
+    ),
+    data_dir: Path | None = typer.Option(  # noqa: B008
+        None, "--data-dir", help="Directorio de datos (por defecto station.yaml → data_dir)"
+    ),
+) -> None:
+    """
+    Mide con ffmpeg (sin modificar ni recodificar) el loudness del stock `ready` y lo
+    guarda en meta, para la normalización en reproducción. Sale con 1 si algo falla.
+    """
+    from radio.core.config import RadioConfig  # noqa: PLC0415
+    from radio.core.paths import db_path  # noqa: PLC0415
+    from radio.core.store import DB  # noqa: PLC0415
+    from radio.producers.post import NullAnalyzer, analyze_stock, choose_analyzer  # noqa: PLC0415
+
+    config = RadioConfig.load(config_dir)
+    path = db_path(data_dir or Path(config.station.data_dir))
+    if not path.exists():
+        typer.echo(f"No existe la BD {path}: todavía no hay stock.")
+        return
+    analyzer = choose_analyzer()
+    if isinstance(analyzer, NullAnalyzer):
+        typer.echo("ffmpeg no está instalado: no se puede medir el loudness.", err=True)
+        raise typer.Exit(1)
+    with DB(path) as db:
+        report = analyze_stock(db, analyzer, kind=kind, missing_only=missing_only)
+    typer.echo(report.to_text())
+    if report.failed:
+        raise typer.Exit(1)
+
+
 @app.command("import-music")
 def import_music(
     directory: Path = typer.Argument(  # noqa: B008
