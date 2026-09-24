@@ -6,7 +6,7 @@ Devuelve fixtures configurables y registra todas las llamadas.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from radio.core.models import LLMResult
@@ -21,6 +21,9 @@ class FakeLLM:
     - ``script``: respuestas en orden, una por llamada (dict, str o una excepción,
       que se lanza); agotada la lista, se repite la última. Tiene prioridad sobre
       ``fixture``. Sirve para simular un LLM que a veces responde mal.
+    - ``responder``: función ``(system, user) -> respuesta`` (dict, str o excepción);
+      tiene prioridad sobre ``script`` y ``fixture``. Para dobles que contestan según
+      el prompt (p. ej. ``radio.producers.host_intro_fake``).
     - ``cost_eur``: coste que declara cada llamada (0 por defecto), para probar la
       contabilidad de ``producer_runs``.
     """
@@ -30,11 +33,13 @@ class FakeLLM:
         fixture: Any = None,
         *,
         script: Sequence[Any] | None = None,
+        responder: Callable[[str, str], Any] | None = None,
         cost_eur: float = 0.0,
         model: str = "fake",
     ) -> None:
         self.fixture = fixture
         self.script = list(script) if script is not None else None
+        self.responder = responder
         self.cost_eur = cost_eur
         self.model = model
         self.calls: list[dict[str, Any]] = []
@@ -64,7 +69,7 @@ class FakeLLM:
             }
         )
 
-        answer = self._next()
+        answer = self.responder(system, user) if self.responder else self._next()
         if isinstance(answer, BaseException):
             raise answer
         if answer is None:

@@ -50,7 +50,10 @@ def test_repo_config_loads() -> None:
     assert cfg.voices.by_role("host") == [host]
 
     prods = cfg.producers.producers
-    assert set(prods) == {"time_signal", "music_tinydesk"}
+    assert set(prods) == {"time_signal", "music_tinydesk", "host_intro"}
+    hi = prods["host_intro"]
+    assert (hi.active, hi.target_stock, hi.cron) == (True, 10, "15 */2 * * *")
+    assert hi.params["voice_id"] == "locutor_principal"
     ts = prods["time_signal"]
     assert (ts.active, ts.target_stock, ts.cron) == (True, 2, "*/30 * * * *")
     td = prods["music_tinydesk"]

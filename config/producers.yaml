@@ -29,3 +29,20 @@ producers:
       max_download_mb: 400   # se descarta un episodio más grande
       download_delay_s: 1.0  # pausa entre descargas (secuenciales)
       loudnorm: false        # normalizar con ffmpeg (recodifica: caro en una Pi)
+
+  host_intro:
+    # Fase 2: intro del locutor IA antes de cada concierto, pegada a fuentes
+    # abiertas (MusicBrainz CC0 + Wikipedia CC BY-SA). La descripción del episodio
+    # de NPR nunca llega al LLM (ADR 0003). Gasta LLM (regla de gasto) y TTS.
+    active: true
+    target_stock: 10         # intros `ready` (cada una ligada a una canción)
+    cron: "15 */2 * * *"
+    params:
+      max_chars: 320         # ≈ 20 s leído; el guion más largo se rechaza
+      min_chars: 40
+      max_sentences: 4       # el prompt pide 2–3 (margen para "EE. UU.")
+      max_audio_s: 40        # audio sintetizado más largo → cuarentena
+      voice_id: locutor_principal
+      temperature: 0.3       # Sonnet 5 no la admite (se ignora); otros modelos sí
+      max_tokens: 800
+      sources_ttl_days: 30   # caché de MusicBrainz/Wikipedia en data/cache/sources/
