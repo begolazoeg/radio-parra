@@ -59,6 +59,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -71,7 +72,8 @@ import httpx
 import jinja2
 
 from radio.core.config import RadioConfig
-from radio.core.models import Segment, SegmentKind, SourceDoc, StockView
+from radio.core.models import AudioInfo, Segment, SegmentKind, SourceDoc, StockView
+from radio.core.paths import tmp_dir
 from radio.core.store import DB
 from radio.grounding import Claim, GroundingReport, check_grounding, script_has_facts
 from radio.music.cache import retire_linked
@@ -146,6 +148,11 @@ Outcome = Literal["grounded", "fact_free", "quarantined"]
 
 # Un recolector de fuentes: (artista, idioma) → documentos
 SourceGatherer = Callable[[str, str], list[SourceDoc]]
+
+def make_http_client() -> httpx.Client:
+    """Cliente HTTP de las fuentes abiertas, con el ``User-Agent`` del proyecto."""
+    return httpx.Client(headers={"User-Agent": USER_AGENT}, follow_redirects=True)
+
 
 # ── Comprobaciones de forma ───────────────────────────────────────────────────
 
@@ -327,9 +334,7 @@ class HostIntroProducer(StagedProducer):
                 self._gatherer = None
             return
         own_client = self._external_client is None
-        client = self._external_client or httpx.Client(
-            headers={"User-Agent": USER_AGENT}, follow_redirects=True,
-        )
+        client = self._external_client or make_http_client()
         limiter = RateLimiter(clock=self._clock, sleep=self._sleep)
         ttl_days = float(self.param("sources_ttl_days"))
         cache = SourceCache.for_data_dir(
@@ -708,22 +713,28 @@ class HostIntroProducer(StagedProducer):
                   ctx.stats.tts_chars)
         with self.sources_session(ctx):
             draft = self.draft_for(ctx, music)
-        draft = self.write(ctx, draft)
-        problems = self.validate(ctx, draft)
-        if problems:
-            draft.status = "quarantined"
-            draft.meta.setdefault("grounding", {})["problems"] = problems
-        draft = self.tts(ctx, draft)
-        draft = self.post(ctx, draft)
         segment: Segment | None = None
-        audio_path: Path | None = draft.audio.path if draft.audio else None
-        if register:
-            segment = self.register(ctx, draft)
-            audio_path = segment.path
-        elif draft.audio is not None and out_path is not None:
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            draft.audio.path.replace(out_path)
-            audio_path = out_path
+        try:
+            draft = self.write(ctx, draft)
+            problems = self.validate(ctx, draft)
+            if problems:
+                draft.status = "quarantined"
+                draft.meta.setdefault("grounding", {})["problems"] = problems
+            draft = self.tts(ctx, draft)
+            draft = self.post(ctx, draft)
+            if register:
+                segment = self.register(ctx, draft)
+            elif draft.audio is not None and out_path is not None:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(draft.audio.path, out_path)
+                draft.audio = AudioInfo(path=out_path, duration_s=draft.audio.duration_s)
+        except BaseException:
+            if draft.audio is not None and draft.audio.path.parent == tmp_dir(ctx.data_dir):
+                draft.audio.path.unlink(missing_ok=True)
+            raise
+        audio_path = segment.path if segment is not None else (
+            draft.audio.path if draft.audio else None
+        )
         return PreviewResult(
             draft=draft, music=music, audio_path=audio_path, segment=segment,
             cost_eur=ctx.stats.cost_eur - stats0[0],

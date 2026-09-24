@@ -383,6 +383,107 @@ def analyze_loudness(
         raise typer.Exit(1)
 
 
+@app.command()
+def preview(
+    producer: str = typer.Argument(..., help="Productor a previsualizar (hoy: host_intro)"),
+    fake: bool = typer.Option(
+        False, "--fake", help="LLM, TTS y fuentes simulados: sin red, sin claves, sin BD"
+    ),
+    music_id: str | None = typer.Option(
+        None, "--music-id", help="Canción para la intro (por defecto, la siguiente candidata)"
+    ),
+    no_play: bool = typer.Option(False, "--no-play", help="No reproduce el audio con mpv"),
+    out: Path | None = typer.Option(  # noqa: B008
+        None, "--out", help="Guarda el audio generado en esta ruta"
+    ),
+    register: bool = typer.Option(
+        False, "--register", help="Registra la intro en la BD (por defecto no se registra)"
+    ),
+    config_dir: Path = typer.Option(  # noqa: B008
+        Path("config"), "--config-dir", help="Directorio de configuración"
+    ),
+    data_dir: Path | None = typer.Option(  # noqa: B008
+        None, "--data-dir", help="Directorio de datos (por defecto station.yaml → data_dir)"
+    ),
+    prompts_dir: Path = typer.Option(  # noqa: B008
+        Path("prompts"), "--prompts-dir", help="Directorio de plantillas de prompts"
+    ),
+) -> None:
+    """
+    Genera UN segmento y lo reproduce en local (§9), para iterar prompts y voces.
+
+    Sin --fake usa los proveedores de station.yaml (Claude + Piper) y las fuentes
+    abiertas reales, sobre la música de data/state.db; no registra nada salvo
+    --register. Con --fake no hay red, claves ni BD.
+    """
+    from radio.core.config import RadioConfig  # noqa: PLC0415
+    from radio.preview import (  # noqa: PLC0415
+        PREVIEWABLE,
+        PreviewError,
+        preview_fake,
+        preview_real,
+    )
+
+    if producer not in PREVIEWABLE:
+        typer.echo(f"Sin previsualización para {producer!r} (disponibles: "
+                   f"{', '.join(PREVIEWABLE)})", err=True)
+        raise typer.Exit(2)
+    if fake and (register or music_id):
+        typer.echo("--fake no usa la BD: no admite --register ni --music-id", err=True)
+        raise typer.Exit(2)
+    config = RadioConfig.load(config_dir)
+    try:
+        if fake:
+            code = preview_fake(config, prompts_dir=prompts_dir, play=not no_play, out=out,
+                                echo=typer.echo)
+        else:
+            code = preview_real(
+                config, data_dir=data_dir or Path(config.station.data_dir),
+                prompts_dir=prompts_dir, music_id=music_id, play=not no_play, out=out,
+                register=register, echo=typer.echo,
+            )
+    except PreviewError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if code:
+        raise typer.Exit(code)
+
+
+@app.command()
+def audit(
+    kind: str = typer.Argument(..., help="Kind a auditar (hoy: host_intro)"),
+    config_dir: Path = typer.Option(  # noqa: B008
+        Path("config"), "--config-dir", help="Directorio de configuración"
+    ),
+    db_file: Path | None = typer.Option(  # noqa: B008
+        None, "--db", help="Ruta de la BD (por defecto <data_dir>/state.db)"
+    ),
+) -> None:
+    """
+    Comprueba que el 100 % de las intros 'ready' con datos tienen claims trazables
+    (cada claim cita una fuente guardada y el grounding vuelve a pasar). Sale con
+    código 1 si hay incumplimientos.
+    """
+    from radio.core.config import RadioConfig  # noqa: PLC0415
+    from radio.core.paths import db_path  # noqa: PLC0415
+    from radio.core.store import DB  # noqa: PLC0415
+    from radio.producers.host_intro import audit_host_intros  # noqa: PLC0415
+
+    if kind != "host_intro":
+        typer.echo(f"Sin auditoría para {kind!r} (disponible: host_intro)", err=True)
+        raise typer.Exit(2)
+    config = RadioConfig.load(config_dir)
+    path = db_file or db_path(Path(config.station.data_dir))
+    if not path.exists():
+        typer.echo(f"No existe la BD {path}: nada que auditar.")
+        return
+    with DB(path) as db:
+        report = audit_host_intros(db, config.station.name, kind=kind)
+    typer.echo(report.to_text())
+    if not report.ok:
+        raise typer.Exit(1)
+
+
 @app.command("import-music")
 def import_music(
     directory: Path = typer.Argument(  # noqa: B008
