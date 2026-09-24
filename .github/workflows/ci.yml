@@ -27,3 +27,6 @@ jobs:
 
       - name: Test (pytest)
         run: uv run pytest tests/ -v
+
+      - name: Simulation (6 h, seed 1)
+        run: uv run radio simulate --hours 6 --seed 1
