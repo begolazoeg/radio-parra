@@ -4,6 +4,10 @@ Importación de una biblioteca musical local (p. ej. audios de conciertos Tiny D
 Recorre un directorio, lee duración y etiquetas con mutagen y registra cada pista
 como segmento `kind="music"` en estado `ready`. La importación es idempotente:
 las pistas ya registradas (misma ruta absoluta) se omiten.
+
+Los archivos se quedan donde están (no se copian a ``data/stock/``): ``path`` es la
+ruta original resuelta. Metadatos en ``meta``: ``title``, ``artist``, ``tags``
+(``artist:<slug>``, ``source:tiny_desk``) y ``source = "local"``.
 """
 
 from __future__ import annotations
@@ -12,12 +16,14 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import mutagen
 
 from radio.core.ids import new_id
+from radio.core.models import Segment
 from radio.core.store import DB
 
 logger = logging.getLogger(__name__)
@@ -147,12 +153,20 @@ def _iter_audio_files(root: Path) -> list[Path]:
     )
 
 
-def import_directory(db: DB, root: Path, *, producer: str = "music_library") -> ImportReport:
+def import_directory(
+    db: DB,
+    root: Path,
+    *,
+    producer: str = "music_library",
+    now: datetime | None = None,
+) -> ImportReport:
     """
-    Importa recursivamente los audios de root como segmentos musicales listos.
+    Importa recursivamente los audios de root como segmentos musicales listos
+    (``created_at = now``, por defecto la hora actual en UTC).
     Etiquetas: "artist:<slug>" si hay artista y "source:tiny_desk" si la ruta
     (relativa a root, más el nombre de root) menciona Tiny Desk.
     """
+    created_at = now or datetime.now(UTC)
     root = root.resolve()
     if not root.is_dir():
         raise NotADirectoryError(f"No es un directorio: {root}")
@@ -160,7 +174,7 @@ def import_directory(db: DB, root: Path, *, producer: str = "music_library") -> 
     report = ImportReport()
     for file in _iter_audio_files(root):
         resolved = file.resolve()
-        if db.get_segment_by_audio_path(resolved) is not None:
+        if db.find_by_path(resolved) is not None:
             report.skipped_existing += 1
             continue
 
@@ -179,15 +193,22 @@ def import_directory(db: DB, root: Path, *, producer: str = "music_library") -> 
             tags.append("source:tiny_desk")
 
         db.add_segment(
-            id=new_id(),
-            kind="music",
-            status="ready",
-            title=meta.title,
-            duration_s=meta.duration_s,
-            audio_path=meta.path,
-            producer=producer,
-            source_url=None,
-            tags=tags,
+            Segment(
+                id=new_id(),
+                kind="music",
+                factual=False,
+                path=meta.path,
+                duration_s=meta.duration_s,
+                # +1 µs por pista: la primera rotación sigue el orden de archivos
+                created_at=created_at + timedelta(microseconds=report.added),
+                producer=producer,
+                meta={
+                    "title": meta.title,
+                    "artist": meta.artist,
+                    "tags": tags,
+                    "source": "local",
+                },
+            )
         )
         report.added += 1
         logger.info("Importada: %s (%.1f s)", meta.title, meta.duration_s)

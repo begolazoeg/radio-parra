@@ -1,10 +1,19 @@
-# Configuración global de la emisora Radio Parra
+# Configuración global de la emisora (§5 de ARCHITECTURE.md)
+
+# Nombre provisional: decisión abierta #1 (afecta a jingles y prompts)
+name: "Radio Parra"
+
 timezone: "Europe/Madrid"
+
+# Idioma de la radio: decisión abierta #2 (¿solo español o alternar con catalán?)
 language: "es"
+
+# Directorio de datos: state.db, stock/<kind>/, tmp/ (en .gitignore)
 data_dir: "data"
 
-# Presupuesto mensual en euros para APIs externas
-budget_monthly_eur: 10.0
+# Presupuesto mensual en euros para APIs externas (regla de gasto, §4.2)
+budget:
+  monthly_eur: 10.0
 
 # Nivel de loudness objetivo (EBU R128)
 loudness_lufs: -16.0
@@ -12,6 +21,6 @@ loudness_lufs: -16.0
 providers:
   llm:
     name: "anthropic"
-    model: "claude-3-haiku-20240307"
+    model: "claude-haiku-4-5-20251001"
   tts:
     name: "elevenlabs"

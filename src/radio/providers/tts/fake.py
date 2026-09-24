@@ -11,7 +11,7 @@ import wave
 from pathlib import Path
 from typing import Any
 
-from radio.core.models import AudioInfo
+from radio.core.models import AudioInfo, Voice
 
 # Tasa de muestreo y factor de conversión texto → duración
 _SAMPLE_RATE = 22050
@@ -28,12 +28,7 @@ class FakeTTS:
         self.chars_per_second = chars_per_second
         self.calls: list[dict[str, Any]] = []
 
-    def synthesize(
-        self,
-        text: str,
-        voice: str,
-        out_path: Path,
-    ) -> AudioInfo:
+    def synthesize(self, text: str, voice: Voice, out_path: Path) -> AudioInfo:
         self.calls.append({"text": text, "voice": voice, "out_path": out_path})
 
         duration_s = max(0.1, len(text) / self.chars_per_second)

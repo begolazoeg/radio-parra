@@ -43,9 +43,11 @@ def test_24h_seed1_passes_invariants(report_24h: SimReport) -> None:
     assert r.time_signals_aired >= 23
     assert r.time_signals_on_time == r.time_signals_aired
     assert r.max_talk_ratio_rolling_hour <= r.talk_budget_ratio
-    assert r.music_share > 0.9           # sin factual/ficción, casi todo es música
-    assert r.airtime_s["host_intro"] > 0 and r.airtime_s["jingle"] > 0
+    assert r.music_share > 0.95          # solo música, jingles y señal horaria
+    assert r.airtime_s["jingle"] > 0 and r.airtime_s["time_signal"] > 0
+    assert r.airtime_s["host_intro"] == 0      # host_intro vuelve en Fase 2
     assert r.airtime_s["factual"] == 0 and r.airtime_s["fiction"] == 0
+    assert r.producer_runs >= 47               # cron */30 durante 24 h
     assert sum(r.airtime_s.values()) >= 24 * 3600
     assert len(r.decisions_sample) > 0
 

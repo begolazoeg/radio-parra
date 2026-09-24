@@ -14,13 +14,6 @@ from radio.providers.llm.fake import FakeLLM
 from radio.providers.tts.base import TTS
 from radio.providers.tts.fake import FakeTTS
 
-# Guion por defecto del LLM fake (respuesta JSON de la locutora)
-DEFAULT_FAKE_SCRIPT = (
-    "Buenas, seguís escuchando Radio Parra, la radio de los conciertos pequeños. "
-    "Soy la locutora artificial de la casa y me encanta acompañaros mientras sonáis "
-    "de fondo en la cocina. Sin más prisa, volvemos con más música en directo."
-)
-
 SUPPORTED = ("fake",)
 
 
@@ -44,7 +37,7 @@ def _require(settings: ProviderSettings | None, what: str) -> ProviderSettings:
 def build_llm(settings: ProviderSettings | None) -> LLM:
     """Construye el LLM configurado. ``extra.fixture`` fija la respuesta del fake."""
     cfg = _require(settings, "llm")
-    return FakeLLM(cfg.extra.get("fixture", {"script": DEFAULT_FAKE_SCRIPT}))
+    return FakeLLM(cfg.extra.get("fixture"))
 
 
 def build_tts(settings: ProviderSettings | None) -> TTS:

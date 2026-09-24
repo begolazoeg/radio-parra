@@ -1,27 +1,16 @@
-# Configuración de producers
-# active: false por defecto — activar explícitamente cuando estén implementados
+# Productores (§5 de ARCHITECTURE.md): activo, target_stock, cron y parámetros.
+# cron: 5 campos en hora local de la emisora; sin cron = solo `radio produce` manual.
 producers:
-  music:
-    active: false
-    interval_minutes: 0
-    extra: {}
-
-  host_intro:
-    active: false
-    interval_minutes: 30
-    extra: {}
-
-  factual:
-    active: false
-    interval_minutes: 20
-    extra: {}
-
-  fiction:
-    active: false
-    interval_minutes: 60
-    extra: {}
-
   time_signal:
+    active: true
+    target_stock: 2
+    cron: "*/30 * * * *"
+    params: {}
+
+  music_tinydesk:
     active: false
-    interval_minutes: 60
-    extra: {}
+    target_stock: 30
+    cron: "0 */6 * * *"
+    params:
+      feed_url: null        # decisión abierta #8: la aporta la dueña
+      max_cache_items: 60

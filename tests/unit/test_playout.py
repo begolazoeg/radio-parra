@@ -1,5 +1,5 @@
 """
-Tests unitarios del Playout: selección de segmentos, estados y registro de plays.
+Tests unitarios del Playout: selección de segmentos, estados y registro en play_log.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import pytest
 
 from radio.core.clock import FakeClock
 from radio.core.config import GridConfig, TimeSlot
+from radio.core.models import Segment
 from radio.core.playout import Playout
 from radio.core.scheduler import Scheduler
 from radio.core.store import DB
@@ -52,26 +53,27 @@ class Station:
         self._n = 0
 
     def _duration(self, path: Path) -> float:
-        seg = self.db.get_segment_by_audio_path(path)
-        return float(seg["duration_s"]) if seg else 0.0
+        seg = self.db.find_by_path(path)
+        return seg.duration_s if seg else 0.0
 
     def add(self, seg_id: str, kind: str = "music", *, duration: float = 200.0,
-            tags: list[str] | None = None, exists: bool = True) -> Path:
+            tags: list[str] | None = None, exists: bool = True,
+            expires_at: datetime | None = None) -> Path:
         path = self.tmp / f"{seg_id}.mp3"
         if exists:
             path.write_bytes(b"x")
         self._n += 1
-        self.db.add_segment(
-            id=seg_id, kind=kind, status="ready", title=seg_id, duration_s=duration,
-            audio_path=path, producer="test", tags=tags or [],
-            created_at=f"2026-01-01T00:00:{self._n:02d}",
-        )
+        self.db.add_segment(Segment(
+            id=seg_id, kind=kind, factual=kind != "music", path=path, duration_s=duration,
+            created_at=datetime(2026, 1, 1, 0, 0, self._n, tzinfo=MADRID), producer="test",
+            expires_at=expires_at, meta={"title": seg_id, "tags": tags or []},
+        ))
         return path
 
     def status(self, seg_id: str) -> str:
         seg = self.db.get_segment(seg_id)
         assert seg is not None
-        return str(seg["status"])
+        return seg.status
 
 
 # ── Música ────────────────────────────────────────────────────────────────────
@@ -85,12 +87,21 @@ def test_music_play_logged_with_timestamps_and_stays_ready(tmp_path: Path) -> No
     assert outcome is not None
     assert (outcome.segment_id, outcome.kind, outcome.started_at) == ("m1", "music", T0)
     assert outcome.duration_s == 180.0 and outcome.reason.startswith("music")
-    plays = st.db.list_plays()
+    plays = st.db.list_play_log()
     assert len(plays) == 1
-    assert plays[0]["started_at"] == T0.isoformat()
-    assert plays[0]["ended_at"] == (T0 + timedelta(seconds=180)).isoformat()
-    assert plays[0]["interrupted"] == 0
+    assert plays[0].started_at == T0
+    assert plays[0].ended_at == T0 + timedelta(seconds=180)
+    assert plays[0].skipped is False
+    assert (plays[0].segment_id, plays[0].kind, plays[0].mode) == ("m1", "music", "default")
     assert st.status("m1") == "ready"
+
+
+def test_mode_is_logged(tmp_path: Path) -> None:
+    st = Station(tmp_path)
+    st.playout.mode = "tinydesk"
+    st.add("m1")
+    st.playout.step()
+    assert st.db.list_play_log()[0].mode == "tinydesk"
 
 
 def test_music_excludes_last_artist(tmp_path: Path) -> None:
@@ -149,8 +160,19 @@ def test_time_signal_matches_current_local_hour(tmp_path: Path) -> None:
     outcome = st.playout.step()
 
     assert outcome is not None and outcome.segment_id == "ts10"
-    assert st.status("ts10") == "done"
+    assert st.status("ts10") == "retired"
     assert st.status("ts11") == "ready"
+
+
+def test_expired_time_signal_is_not_aired(tmp_path: Path) -> None:
+    st = Station(tmp_path, datetime(2026, 1, 5, 10, 2, tzinfo=MADRID))
+    st.add("m1")
+    st.add("ts10", "time_signal", duration=3.0,
+           tags=[hour_tag(datetime(2026, 1, 5, 10, tzinfo=MADRID))],
+           expires_at=datetime(2026, 1, 5, 10, 1, tzinfo=MADRID))
+    outcome = st.playout.step()
+    assert outcome is not None and outcome.segment_id == "m1"
+    assert st.status("ts10") == "ready"   # caducarla es cosa del productor
 
 
 def test_time_signal_matches_local_hour_from_utc_clock(tmp_path: Path) -> None:
@@ -175,12 +197,14 @@ def test_time_signal_without_match_falls_back_to_scheduler(tmp_path: Path) -> No
     assert st.status("ts11") == "ready"
 
 
-def test_history_accepts_naive_timestamps(tmp_path: Path) -> None:
-    # Una señal ya emitida con fecha naive (hora local) activa el cooldown
+def test_history_across_timezones(tmp_path: Path) -> None:
+    # Una señal emitida (registrada con reloj UTC) activa el cooldown en hora local
     st = Station(tmp_path, datetime(2026, 1, 5, 10, 2, tzinfo=MADRID))
     st.add("m1")
     st.add("old", "time_signal", duration=3.0)
-    st.db.log_play("old", started_at="2026-01-05T10:00:05", ended_at="2026-01-05T10:00:08")
+    pid = st.db.log_play_start("old", "time_signal", "default",
+                               datetime(2026, 1, 5, 9, 0, 5, tzinfo=ZoneInfo("UTC")))
+    st.db.log_play_end(pid, datetime(2026, 1, 5, 9, 0, 8, tzinfo=ZoneInfo("UTC")))
     st.add("ts10", "time_signal", duration=3.0,
            tags=[hour_tag(datetime(2026, 1, 5, 10, tzinfo=MADRID))])
 
@@ -190,7 +214,7 @@ def test_history_accepts_naive_timestamps(tmp_path: Path) -> None:
 
 # ── Estados y errores ─────────────────────────────────────────────────────────
 
-def test_missing_file_marks_error_and_retries(tmp_path: Path) -> None:
+def test_missing_file_quarantines_and_retries(tmp_path: Path) -> None:
     st = Station(tmp_path)
     st.add("gone", exists=False)
     st.add("ok")
@@ -198,8 +222,8 @@ def test_missing_file_marks_error_and_retries(tmp_path: Path) -> None:
     outcome = st.playout.step()
 
     assert outcome is not None and outcome.segment_id == "ok"
-    assert st.status("gone") == "error"
-    assert [p["segment_id"] for p in st.db.list_plays()] == ["ok"]
+    assert st.status("gone") == "quarantined"
+    assert [p.segment_id for p in st.db.list_play_log()] == ["ok"]
 
 
 def test_missing_file_ignored_without_verification(tmp_path: Path) -> None:
@@ -214,16 +238,16 @@ def test_all_files_missing_returns_none(tmp_path: Path) -> None:
     for i in range(3):
         st.add(f"gone{i}", exists=False)
     assert st.playout.step() is None
-    assert all(st.status(f"gone{i}") == "error" for i in range(3))
+    assert all(st.status(f"gone{i}") == "quarantined" for i in range(3))
 
 
-def test_talk_marked_done_after_airing(tmp_path: Path) -> None:
+def test_talk_retired_after_airing(tmp_path: Path) -> None:
     st = Station(tmp_path)
     st.add("m1")
     st.add("intro", "host_intro", duration=15.0)
     outcome = st.playout.step()   # historial vacío → la palabra está permitida
     assert outcome is not None and outcome.segment_id == "intro"
-    assert st.status("intro") == "done"
+    assert st.status("intro") == "retired"
 
 
 def test_jingle_stays_ready(tmp_path: Path) -> None:
@@ -248,7 +272,7 @@ def test_interrupted_talk_stays_ready(tmp_path: Path) -> None:
 
     assert outcome is not None
     assert st.status("intro") == "ready"
-    assert st.db.list_plays()[0]["interrupted"] == 1
+    assert st.db.list_play_log()[0].skipped is True
 
 
 # ── Emergencia ────────────────────────────────────────────────────────────────
@@ -272,7 +296,7 @@ def test_emergency_audio_rotates_and_is_not_logged(tmp_path: Path) -> None:
     assert st.playout.step() is None
     assert st.playout.last_emergency == emergency / "b.mp3"
     assert [c["path"].name for c in st.null_audio.calls] == ["a.ogg", "b.mp3"]
-    assert st.db.list_plays() == []
+    assert st.db.list_play_log() == []
 
 
 @pytest.mark.parametrize("window", [0, 120])
@@ -282,7 +306,8 @@ def test_history_window_limits_records(tmp_path: Path, window: int) -> None:
     st.playout.history_window = timedelta(minutes=window)
     st.add("m1")
     st.add("old", "time_signal", duration=3.0)
-    st.db.log_play("old", started_at=datetime(2026, 1, 5, 10, 1, tzinfo=MADRID).isoformat())
+    st.db.log_play_start("old", "time_signal", "default",
+                         datetime(2026, 1, 5, 10, 1, tzinfo=MADRID))
     st.add("ts10", "time_signal", duration=3.0,
            tags=[hour_tag(datetime(2026, 1, 5, 10, tzinfo=MADRID))])
     outcome = st.playout.step()

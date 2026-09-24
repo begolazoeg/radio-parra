@@ -2,13 +2,13 @@
 Simulación acelerada de la emisora (``radio simulate``).
 
 Monta la emisora completa en memoria —BD ``:memory:``, ``FakeClock``, catálogo
-musical sintético, producers de señal horaria y locutora con ``FakeLLM``/``FakeTTS``—
-y la hace funcionar N horas de tiempo simulado sin esperar ni reproducir audio.
+musical sintético y el producer de señal horaria con ``FakeLLM``/``FakeTTS``— y la
+hace funcionar N horas de tiempo simulado sin esperar ni reproducir audio.
 
 Cómo avanza el tiempo
 ---------------------
 ``SimAudioBackend`` sustituye al reproductor: en ``play(path)`` avanza el
-``FakeClock`` la duración del segmento, que obtiene de la BD por su ``audio_path``.
+``FakeClock`` la duración del segmento, que obtiene de la BD por su ``path``.
 Así el ``Playout`` real registra ``started_at``/``ended_at`` correctos sin saber
 que está en una simulación. Si un paso no emite nada, el bucle avanza el reloj
 ``DEAD_AIR_STEP_S`` segundos y lo cuenta como silencio.
@@ -35,12 +35,12 @@ from zoneinfo import ZoneInfo
 
 from radio.core.clock import FakeClock
 from radio.core.config import ProducersConfig, ProducerSettings, RadioConfig
+from radio.core.models import Segment
 from radio.core.playout import ARTIST_PREFIX, Playout, PlayOutcome
 from radio.core.scheduler import ALL_KINDS, BUDGET_WINDOW, TALK_KINDS, Scheduler
 from radio.core.store import DB
-from radio.producers import HostIntroProducer, ProducerContext, ProducerRunner, TimeSignalProducer
+from radio.producers import ProducerContext, ProducerRunner, TimeSignalProducer
 from radio.providers.llm.fake import FakeLLM
-from radio.providers.registry import DEFAULT_FAKE_SCRIPT
 from radio.providers.tts.fake import FakeTTS
 
 # ── Parámetros de la simulación ───────────────────────────────────────────────
@@ -56,8 +56,7 @@ DECISIONS_SAMPLE = 12
 
 # Producers activos en la simulación (no se toca producers.yaml)
 SIM_PRODUCERS: dict[str, ProducerSettings] = {
-    "time_signal": ProducerSettings(active=True, interval_minutes=30),
-    "host_intro": ProducerSettings(active=True, interval_minutes=10),
+    "time_signal": ProducerSettings(active=True, target_stock=2, cron="*/30 * * * *"),
 }
 
 
@@ -178,27 +177,33 @@ def build_catalog(db: DB, rng: random.Random, created_at: datetime) -> None:
     rng.shuffle(tracks)
     for order, (seg_id, artist, duration) in enumerate(tracks):
         db.add_segment(
-            id=seg_id,
-            kind="music",
-            status="ready",
-            # created_at distinto por pista: fija el orden de la primera rotación
-            created_at=(created_at + timedelta(microseconds=order)).isoformat(),
-            title=f"{artist} — tema {seg_id[-3:]}",
-            duration_s=round(duration, 3),
-            audio_path=Path(f"/sim/music/{seg_id}.mp3"),
-            producer="sim",
-            tags=[f"{ARTIST_PREFIX}{artist}", "source:tiny_desk"],
+            Segment(
+                id=seg_id,
+                kind="music",
+                factual=False,
+                path=Path(f"/sim/music/{seg_id}.mp3"),
+                duration_s=round(duration, 3),
+                # created_at distinto por pista: fija el orden de la primera rotación
+                created_at=created_at + timedelta(microseconds=order),
+                producer="sim",
+                meta={
+                    "title": f"{artist} — tema {seg_id[-3:]}",
+                    "tags": [f"{ARTIST_PREFIX}{artist}", "source:tiny_desk"],
+                },
+            )
         )
     for i in range(N_JINGLES):
         db.add_segment(
-            id=f"sim-jingle-{i}",
-            kind="jingle",
-            status="ready",
-            created_at=created_at.isoformat(),
-            title=f"Jingle {i + 1}",
-            duration_s=round(rng.uniform(*JINGLE_DURATION_S), 3),
-            audio_path=Path(f"/sim/jingles/jingle-{i}.wav"),
-            producer="sim",
+            Segment(
+                id=f"sim-jingle-{i}",
+                kind="jingle",
+                factual=False,
+                path=Path(f"/sim/jingles/jingle-{i}.wav"),
+                duration_s=round(rng.uniform(*JINGLE_DURATION_S), 3),
+                created_at=created_at,
+                producer="sim",
+                meta={"title": f"Jingle {i + 1}"},
+            )
         )
 
 
@@ -241,7 +246,7 @@ def _back_to_back_artists(db: DB, aired: Sequence[_Aired]) -> int:
         if item.kind != "music":
             continue
         seg = db.get_segment(item.segment_id)
-        tags = {t for t in (seg["tags"] if seg else []) if t.startswith(ARTIST_PREFIX)}
+        tags = {t for t in (seg.tags if seg else ()) if t.startswith(ARTIST_PREFIX)}
         if previous is not None and tags and tags & previous:
             count += 1
         previous = tags
@@ -275,8 +280,8 @@ def run_simulation(
     scheduler = Scheduler(config.grid, rng=random.Random(seed))
 
     def duration_of(path: Path) -> float:
-        seg = db.get_segment_by_audio_path(path)
-        return float(seg["duration_s"]) if seg else 0.0
+        seg = db.find_by_path(path)
+        return seg.duration_s if seg else 0.0
 
     end = start + timedelta(hours=hours)
     outcomes: list[PlayOutcome] = []
@@ -286,13 +291,13 @@ def run_simulation(
             ctx = ProducerContext(
                 db=db,
                 clock=clock,
-                llm=FakeLLM({"script": DEFAULT_FAKE_SCRIPT}),
+                llm=FakeLLM(),
                 tts=FakeTTS(),
                 config=config,
                 data_dir=Path(tmp),
                 prompts_dir=prompts_dir,
             )
-            runner = ProducerRunner(ctx, [TimeSignalProducer(), HostIntroProducer()])
+            runner = ProducerRunner(ctx, [TimeSignalProducer()])
             playout = Playout(
                 db,
                 scheduler,
@@ -331,14 +336,9 @@ def _build_report(
     dead_air: float,
 ) -> SimReport:
     aired = [
-        _Aired(
-            kind=str(p["kind"]),
-            start=datetime.fromisoformat(str(p["started_at"])),
-            end=datetime.fromisoformat(str(p["ended_at"])),
-            segment_id=str(p["segment_id"]),
-        )
-        for p in db.list_plays()
-        if p["ended_at"]
+        _Aired(kind=p.kind, start=p.started_at, end=p.ended_at, segment_id=p.segment_id)
+        for p in db.list_play_log()
+        if p.ended_at is not None and p.segment_id is not None
     ]
     airtime: dict[str, float] = {k: 0.0 for k in ALL_KINDS}
     for item in aired:
@@ -350,7 +350,8 @@ def _build_report(
     on_time = sum(1 for a in signals if a.start.astimezone(tz).minute < 5)
     expected = max(0, int(hours) - 1)
     back_to_back = _back_to_back_artists(db, aired)
-    errors = db.count_producer_runs(status="error")
+    runs = db.list_producer_runs()
+    errors = sum(1 for r in runs if r.ok is False)
 
     failures: list[str] = []
     if dead_air > 0:
@@ -387,7 +388,7 @@ def _build_report(
         time_signals_expected_min=expected,
         back_to_back_artist=back_to_back,
         dead_air_s=dead_air,
-        producer_runs=db.count_producer_runs(),
+        producer_runs=len(runs),
         producer_errors=errors,
         decisions_sample=sample,
         failures=failures,

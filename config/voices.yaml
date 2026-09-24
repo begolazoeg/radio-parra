@@ -1,23 +1,12 @@
-# Voces disponibles para TTS
-# consent: true es OBLIGATORIO — no se puede usar una voz sin consentimiento explícito
+# Voces disponibles para TTS (§5 de ARCHITECTURE.md)
+# Regla de carga: toda voz necesita consent: true y una consent_note no vacía.
+# La voz del locutor (sintética genérica o clonada) es la decisión abierta #4:
+# de momento solo hay una voz genérica provisional.
 voices:
-  - id: "host_main"
-    name: "Locutora Principal"
-    provider: "elevenlabs"
+  - id: locutor_principal
+    role: host
+    provider: cloud
+    provider_voice_id: "<pendiente>"
+    language: es
     consent: true
-    language: "es"
-    description: "Voz principal de la emisora, cálida y cercana"
-
-  - id: "host_news"
-    name: "Locutora Noticias"
-    provider: "elevenlabs"
-    consent: true
-    language: "es"
-    description: "Voz para segmentos factuales, clara y precisa"
-
-  - id: "narrator_fiction"
-    name: "Narrador Ficción"
-    provider: "elevenlabs"
-    consent: true
-    language: "es"
-    description: "Voz narrativa para los universos de ficción"
+    consent_note: "Voz sintética genérica del proveedor"

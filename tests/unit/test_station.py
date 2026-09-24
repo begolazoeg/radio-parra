@@ -14,6 +14,7 @@ import pytest
 
 from radio.core.clock import FakeClock
 from radio.core.config import ProducersConfig, ProducerSettings, ProviderSettings, RadioConfig
+from radio.core.models import Segment
 from radio.core.playout import Playout
 from radio.core.scheduler import Scheduler
 from radio.core.store import DB
@@ -30,7 +31,7 @@ def config(llm: str = "fake", tts: str = "fake") -> RadioConfig:
         "llm": ProviderSettings(name=llm), "tts": ProviderSettings(name=tts),
     }})
     producers = ProducersConfig(producers={
-        "time_signal": ProducerSettings(active=True, interval_minutes=30),
+        "time_signal": ProducerSettings(active=True, target_stock=2, cron="*/30 * * * *"),
     })
     return base.model_copy(update={"station": station, "producers": producers})
 
@@ -55,23 +56,27 @@ def make_playout(db: DB, clock: FakeClock, emergency_dir: Path | None = None) ->
 
 def test_station_loop_airs_and_runs_producers(tmp_path: Path) -> None:
     db = DB(":memory:")
-    clock = FakeClock(datetime(2026, 1, 5, 10, 20, tzinfo=MADRID))
+    now = datetime(2026, 1, 5, 10, 20, tzinfo=MADRID)
+    clock = FakeClock(now)
     for i in range(3):
         path = tmp_path / f"m{i}.mp3"
         path.write_bytes(b"x")
-        db.add_segment(id=f"m{i}", kind="music", status="ready", title=f"m{i}",
-                       duration_s=200, audio_path=path, producer="t", tags=[f"artist:{i}"])
+        db.add_segment(Segment(
+            id=f"m{i}", kind="music", factual=False, path=path, duration_s=200,
+            created_at=now, producer="t", meta={"title": f"m{i}", "tags": [f"artist:{i}"]},
+        ))
     playout = make_playout(db, clock)
     runner = build_runner(config(), db, clock, tmp_path / "data", REPO / "prompts")
     assert runner is not None
     sleeps: list[float] = []
 
-    aired = run_station_loop(playout, runner, should_stop=lambda: len(db.list_plays()) >= 3,
+    aired = run_station_loop(playout, runner, should_stop=lambda: len(db.list_play_log()) >= 3,
                              sleep=sleeps.append)
 
     assert aired == 3
-    assert [p["segment_id"] for p in db.list_plays()] == ["m0", "m1", "m2"]
-    assert db.count_ready_by_kind()["time_signal"] == 2   # el producer ha corrido
+    assert [p.segment_id for p in db.list_play_log()] == ["m0", "m1", "m2"]
+    assert db.stock_view(clock.now()).count("time_signal") == 2   # el producer ha corrido
+    assert (tmp_path / "data" / "stock" / "time_signal").is_dir()
     assert sleeps == []
 
 

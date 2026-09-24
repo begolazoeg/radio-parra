@@ -5,12 +5,14 @@ Tests unitarios para la importación de la biblioteca musical local (music/libra
 from __future__ import annotations
 
 import wave
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from radio.cli import app
+from radio.core.models import Segment
 from radio.core.store import DB
 from radio.music.library import (
     AUDIO_EXTENSIONS,
@@ -63,8 +65,8 @@ def library(tmp_path: Path) -> Path:
     return root
 
 
-def _by_title(db: DB) -> dict[str, dict[str, object]]:
-    return {s["title"]: s for s in db.list_segments(kind="music")}
+def _by_title(db: DB) -> dict[str, Segment]:
+    return {s.title: s for s in db.list_segments(kind="music")}
 
 
 # ── slugify ───────────────────────────────────────────────────────────────────
@@ -138,21 +140,34 @@ def test_import_directory_adds_tracks(db: DB, library: Path) -> None:
         "Joga",
     }
     for seg in segs.values():
-        assert seg["kind"] == "music"
-        assert seg["status"] == "ready"
-        assert seg["producer"] == "music_library"
-        assert seg["source_url"] is None
-        assert Path(str(seg["audio_path"])).is_absolute()
-        assert float(seg["duration_s"]) > 0  # type: ignore[arg-type]
+        assert seg.kind == "music"
+        assert seg.status == "ready"
+        assert seg.factual is False
+        assert seg.producer == "music_library"
+        assert seg.meta["source"] == "local"
+        assert seg.path.is_absolute() and seg.path.is_file()   # el archivo no se mueve
+        assert seg.duration_s > 0
+    assert segs["Joga"].meta["artist"] == "Björk"
+    assert segs["loose track name"].meta["artist"] is None
+
+
+def test_import_directory_created_at_and_order(db: DB, library: Path) -> None:
+    now = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
+    import_directory(db, library, now=now)
+    segs = db.list_segments(kind="music")
+    assert all(s.created_at >= now for s in segs)
+    # Orden de alta = orden de archivos (rotación inicial determinista)
+    assert len(segs) == 4
+    assert [s.path for s in segs] == sorted(s.path for s in segs)
 
 
 def test_import_directory_tags(db: DB, library: Path) -> None:
     import_directory(db, library)
     segs = _by_title(db)
-    assert segs["Tiny Desk (Home) Concert"]["tags"] == ["artist:rosalia", "source:tiny_desk"]
-    assert segs["Live"]["tags"] == ["artist:anderson-paak", "source:tiny_desk"]
-    assert segs["Joga"]["tags"] == ["artist:bjork"]
-    assert segs["loose track name"]["tags"] == []
+    assert segs["Tiny Desk (Home) Concert"].tags == ("artist:rosalia", "source:tiny_desk")
+    assert segs["Live"].tags == ("artist:anderson-paak", "source:tiny_desk")
+    assert segs["Joga"].tags == ("artist:bjork",)
+    assert segs["loose track name"].tags == ()
 
 
 def test_import_directory_tiny_desk_folder_variants(db: DB, tmp_path: Path) -> None:
@@ -161,8 +176,8 @@ def test_import_directory_tiny_desk_folder_variants(db: DB, tmp_path: Path) -> N
     _make_wav(root / "TINY-DESK concerts" / "b.wav")
     _make_wav(root / "other" / "c.wav")
     import_directory(db, root)
-    tags = {s["title"]: s["tags"] for s in db.list_segments(kind="music")}
-    assert tags == {"a": ["source:tiny_desk"], "b": ["source:tiny_desk"], "c": []}
+    tags = {s.title: s.tags for s in db.list_segments(kind="music")}
+    assert tags == {"a": ("source:tiny_desk",), "b": ("source:tiny_desk",), "c": ()}
 
 
 def test_import_directory_is_idempotent(db: DB, library: Path) -> None:
@@ -174,17 +189,17 @@ def test_import_directory_is_idempotent(db: DB, library: Path) -> None:
     assert len(db.list_segments(kind="music")) == 4
 
 
-def test_import_directory_dedup_uses_audio_path(db: DB, library: Path) -> None:
+def test_import_directory_dedup_uses_path(db: DB, library: Path) -> None:
     import_directory(db, library)
     path = (library / "nested" / "deeper" / "Björk - Joga.wav").resolve()
-    seg = db.get_segment_by_audio_path(path)
+    seg = db.find_by_path(path)
     assert seg is not None
-    assert seg["title"] == "Joga"
+    assert seg.title == "Joga"
 
 
 def test_import_directory_custom_producer(db: DB, library: Path) -> None:
     import_directory(db, library, producer="tiny_desk_import")
-    assert {s["producer"] for s in db.list_segments(kind="music")} == {"tiny_desk_import"}
+    assert {s.producer for s in db.list_segments(kind="music")} == {"tiny_desk_import"}
 
 
 def test_import_directory_rejects_non_directory(db: DB, tmp_path: Path) -> None:
@@ -195,7 +210,7 @@ def test_import_directory_rejects_non_directory(db: DB, tmp_path: Path) -> None:
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def test_cli_import_music(library: Path, tmp_path: Path) -> None:
-    db_path = tmp_path / "sub" / "radio.db"
+    db_path = tmp_path / "sub" / "state.db"
     runner = CliRunner()
 
     result = runner.invoke(app, ["import-music", str(library), "--db", str(db_path)])
@@ -219,6 +234,6 @@ def test_cli_import_music(library: Path, tmp_path: Path) -> None:
 
 def test_cli_import_music_missing_dir(tmp_path: Path) -> None:
     result = CliRunner().invoke(
-        app, ["import-music", str(tmp_path / "nope"), "--db", str(tmp_path / "r.db")]
+        app, ["import-music", str(tmp_path / "nope"), "--db", str(tmp_path / "state.db")]
     )
     assert result.exit_code != 0

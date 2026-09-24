@@ -3,7 +3,12 @@ Producer de señal horaria.
 
 Mantiene un pequeño stock de locuciones "Son las X en punto" para las
 próximas horas en punto (hora local de la emisora). No usa LLM, solo TTS.
-Las señales de horas ya pasadas se marcan como "done" para no emitirlas tarde.
+
+- Número de horas preparadas: ``target_stock`` de producers.yaml (por defecto 2).
+- Cada señal es factual (la fuente es el reloj), con prioridad alta (1, §14) y
+  caduca ``SIGNAL_WINDOW`` después de su hora en punto: pasada la ventana ya no
+  tiene sentido emitirla. Las caducadas se marcan ``expired`` en cada ejecución.
+- Se identifica por la etiqueta ``hour:YYYY-MM-DDTHH`` en ``meta["tags"]``.
 """
 
 from __future__ import annotations
@@ -12,19 +17,17 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from radio.core.ids import new_id
-from radio.core.models import SegmentKind
-from radio.producers.base import (
-    STATION_NAME,
-    ProducerContext,
-    pick_voice,
-    write_segment_audio,
-)
+from radio.core.models import Segment, SegmentKind
+from radio.core.scheduler import TIME_SIGNAL_WINDOW_MIN
+from radio.producers.base import ProducerContext, pick_voice, write_segment_audio
 
-# Número de horas futuras con señal preparada
+# Número de horas futuras con señal preparada si producers.yaml no dice otra cosa
 HOURS_AHEAD = 2
-# Una señal cuya hora pasó hace más de esto ya no se emite
-EXPIRY = timedelta(hours=1)
-VOICE_ID = "host_main"
+# Pasado este margen tras la hora en punto, la señal caduca
+SIGNAL_WINDOW = timedelta(minutes=TIME_SIGNAL_WINDOW_MIN)
+# Prioridad "alta" del catálogo (§14): >0 puede interrumpir
+PRIORITY = 1
+VOICE_ID = "locutor_principal"
 TAG_PREFIX = "hour:"
 _TAG_FORMAT = "%Y-%m-%dT%H"
 
@@ -48,9 +51,9 @@ def hour_phrase(hour: int) -> str:
     return f"Son las {word} en punto"
 
 
-def time_signal_text(hour: int) -> str:
+def time_signal_text(hour: int, station_name: str) -> str:
     """Texto completo de la señal horaria."""
-    return f"{hour_phrase(hour)} en {STATION_NAME}."
+    return f"{hour_phrase(hour)} en {station_name}."
 
 
 def hour_tag(dt: datetime) -> str:
@@ -62,67 +65,62 @@ class TimeSignalProducer:
     """Genera las señales horarias de las próximas horas."""
     name = "time_signal"
     kind: SegmentKind = "time_signal"
+    factual = True
 
     def run(self, ctx: ProducerContext) -> list[str]:
         tz = ZoneInfo(ctx.config.station.timezone)
-        now = ctx.clock.now().astimezone(tz)
-        existing = ctx.db.list_segments(kind=self.kind)
+        created_at = ctx.clock.now()
+        now = created_at.astimezone(tz)
 
-        # 1) Caducar señales de horas ya pasadas
-        for seg in existing:
-            if seg["status"] != "ready":
-                continue
-            slot = _tag_hour(seg["tags"], tz)
-            if slot is not None and slot < now - EXPIRY:
-                ctx.db.update_segment_status(seg["id"], "done")
+        # 1) Caducar señales cuya ventana ya pasó
+        ctx.db.expire_segments(now, kind=self.kind)
 
         # 2) Crear las que falten para las próximas horas en punto
+        #    (una en cuarentena, p. ej. por audio perdido, se vuelve a generar)
         have = {
             tag
-            for seg in existing
-            if seg["status"] != "error"
-            for tag in seg["tags"]
+            for seg in ctx.db.list_segments(kind=self.kind)
+            if seg.status != "quarantined"
+            for tag in seg.tags
             if tag.startswith(TAG_PREFIX)
         }
+        settings = ctx.config.producers.get(self.name)
+        hours_ahead = settings.target_stock if settings and settings.target_stock else HOURS_AHEAD
         voice = pick_voice(ctx.config, VOICE_ID)
+        station_name = ctx.config.station.name
         base = now.replace(minute=0, second=0, microsecond=0).astimezone(UTC)
         created: list[str] = []
-        for i in range(1, HOURS_AHEAD + 1):
+        for i in range(1, hours_ahead + 1):
             # Aritmética en UTC para respetar los cambios de horario
             slot = (base + timedelta(hours=i)).astimezone(tz)
             tag = hour_tag(slot)
             if tag in have:
                 continue
-            text = time_signal_text(slot.hour)
+            text = time_signal_text(slot.hour, station_name)
             seg_id = new_id()
             audio = write_segment_audio(
-                ctx, kind=self.kind, seg_id=seg_id, text=text, voice_id=voice.id
+                ctx, kind=self.kind, seg_id=seg_id, text=text, voice=voice
             )
             ctx.db.add_segment(
-                id=seg_id,
-                kind=self.kind,
-                status="ready",
-                created_at=ctx.clock.now().isoformat(),
-                title=f"Señal horaria {slot:%H}:00",
-                duration_s=audio.duration_s,
-                audio_path=audio.path,
-                producer=self.name,
-                script=text,
-                voice_id=voice.id,
-                tags=[tag],
+                Segment(
+                    id=seg_id,
+                    kind=self.kind,
+                    factual=self.factual,
+                    path=audio.path,
+                    duration_s=audio.duration_s,
+                    created_at=created_at,
+                    producer=self.name,
+                    expires_at=slot + SIGNAL_WINDOW,
+                    priority=PRIORITY,
+                    voice_id=voice.id,
+                    meta={
+                        "title": f"Señal horaria {slot:%H}:00",
+                        "tags": [tag],
+                        "script": text,
+                        "sources": [{"id": "reloj", "text": slot.isoformat(), "url": ""}],
+                    },
+                )
             )
             have.add(tag)
             created.append(seg_id)
         return created
-
-
-def _tag_hour(tags: list[str], tz: ZoneInfo) -> datetime | None:
-    """Extrae la hora local de la etiqueta 'hour:...' o None si no la hay."""
-    for tag in tags:
-        if tag.startswith(TAG_PREFIX):
-            try:
-                naive = datetime.strptime(tag[len(TAG_PREFIX):], _TAG_FORMAT)
-            except ValueError:
-                return None
-            return naive.replace(tzinfo=tz)
-    return None

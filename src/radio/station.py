@@ -2,7 +2,7 @@
 Bucle real de la emisora (``radio station``).
 
 Monta las piezas de producción —``SystemClock`` en la zona de la emisora, BD en
-``data/radio.db``, ``MpvAudioBackend``, ``Scheduler`` con la parrilla y un
+``data/state.db``, ``MpvAudioBackend``, ``Scheduler`` con la parrilla y un
 ``ProducerRunner`` con los producers de producers.yaml— y emite sin parar.
 
 Decisiones de Fase 1
@@ -29,11 +29,11 @@ from types import FrameType
 
 from radio.core.clock import Clock, SystemClock
 from radio.core.config import RadioConfig
+from radio.core.paths import db_path
 from radio.core.playout import Playout
 from radio.core.scheduler import Scheduler
 from radio.core.store import DB
 from radio.producers import (
-    HostIntroProducer,
     Producer,
     ProducerContext,
     ProducerRunner,
@@ -49,7 +49,7 @@ IDLE_SLEEP_S = 5.0
 
 def default_producers() -> list[Producer]:
     """Producers implementados; el runner solo ejecuta los activos en producers.yaml."""
-    return [TimeSignalProducer(), HostIntroProducer()]
+    return [TimeSignalProducer()]
 
 
 def run_station_loop(
@@ -115,7 +115,7 @@ def run_station(
     config = RadioConfig.load(config_dir)
     tz = config.station.timezone
     data_dir.mkdir(parents=True, exist_ok=True)
-    db = DB(data_dir / "radio.db")
+    db = DB(db_path(data_dir))
     clock = SystemClock(tz)
     playout = Playout(
         db,
@@ -137,7 +137,9 @@ def run_station(
     previous = {
         sig: signal.signal(sig, handle_signal) for sig in (signal.SIGINT, signal.SIGTERM)
     }
-    logger.info("Radio Parra en antena (zona %s, BD %s)", tz, data_dir / "radio.db")
+    logger.info(
+        "%s en antena (zona %s, BD %s)", config.station.name, tz, db_path(data_dir)
+    )
     try:
         return run_station_loop(playout, runner, should_stop=stop.is_set, sleep=stop.wait)
     finally:
