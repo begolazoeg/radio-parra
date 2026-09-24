@@ -563,7 +563,8 @@ Cada fase termina en una rama/PR con **criterios de aceptación** verificables.
 8. **Feed exacto de Tiny Desk** en audio (verificar URL y términos de uso en el momento de implementarlo).
    → *Resuelta (2026-09-24):* `https://feeds.npr.org/510306/podcast.xml` ("Tiny Desk Concerts - Audio").
    Términos de NPR: uso personal y no comercial, sin modificar el contenido, sin usarlo para construir o
-   entrenar sistemas de IA. Pendiente de revisar antes de la Fase 2 (descripciones del episodio como fuente del LLM).
+   entrenar sistemas de IA. Revisado para la Fase 2: la descripción del episodio **no** se usa como fuente del LLM
+   ni se guarda; las intros se basan solo en MusicBrainz y Wikipedia (ADR 0003).
 9. **Deporte inventado** y su bible de reglas (para `liga`).
 
 ---
