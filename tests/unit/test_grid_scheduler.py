@@ -286,6 +286,17 @@ def test_jingle_filler_when_no_music_fits() -> None:
     assert ids(unit_at(grid, segs, now, mode="tinydesk")) == ["m"]
 
 
+def test_no_jingle_chain_before_a_distant_interrupt() -> None:
+    """Conciertos largos: a 10 min de la señal no se encadenan jingles; suena música
+    (la emisora la cortará en punto si ``cut_music``)."""
+    grid = doc_grid()
+    now = local(2026, 1, 5, 10, 50)
+    segs = [seg("concierto", "music", 1500.0), seg("j", "jingle", 8.0),
+            signal(local(2026, 1, 5, 11))]
+    unit = unit_at(grid, segs, now)
+    assert ids(unit) == ["concierto"] and "ninguna acaba antes" in unit.reason
+
+
 # ── Patrón y franjas ──────────────────────────────────────────────────────────
 
 def test_pattern_cycles_with_advance_state() -> None:

@@ -10,13 +10,14 @@ API
 caso devuelve una unidad vacía de peldaño 5 (emergencia) y quien llama emite
 ``assets/emergency/``.
 
-Tras emitir una unidad, quien llama actualiza el estado con
+Tras emitir (o planificar) una unidad, quien llama actualiza el estado con
 ``advance_state(state, unit, started_at)`` (añade las emisiones al historial y avanza
-el cursor del patrón). Una emisora respaldada por SQLite puede, en su lugar,
-reconstruir ``history``/``segments`` desde ``play_log`` en cada paso y conservar solo
-``pattern_pos`` en memoria (así lo hace ``core/playout.py``). En un bucle puro (tests,
-simulaciones sin BD) quien llama debe además retirar del stock la palabra emitida,
-igual que hace el playout en la BD (``retired``).
+el cursor del patrón). La emisora (``radio.station.engine``) reconstruye
+``history``/``segments`` desde ``play_log`` en cada decisión, les añade con
+``advance_state`` lo que ya tiene en cola (en sus horas proyectadas) y conserva
+``pattern_pos`` en memoria. En un bucle puro (tests, simulaciones sin BD) quien llama
+debe además retirar del stock la palabra emitida, igual que hace la emisora en la BD
+(``retired``).
 
 Algoritmo (en el orden de §4.3)
 -------------------------------
@@ -60,9 +61,12 @@ Jingles
 -------
 Entran por dos vías: huecos ``jingle`` en el ``pattern`` (identificativo de emisora,
 separan factual de ficción) y como **relleno** antes de una interrupción: si no queda
-ninguna canción que termine a tiempo para la próxima señal horaria, se rellena con
-jingles/stingers cortos (solo en modos con interrupciones; no consumen hueco del
-patrón). No cuentan como palabra.
+ninguna canción que termine a tiempo para la próxima señal horaria y faltan como mucho
+``FILLER_MAX_GAP_S`` segundos, se rellena con jingles/stingers cortos (solo en modos
+con interrupciones; no consumen hueco del patrón). No cuentan como palabra. Con un
+hueco mayor (p. ej. conciertos de Tiny Desk de 15–30 min) se elige música igualmente:
+la emisora la corta a la hora de la interrupción (``station.interrupts.cut_music``) en
+lugar de encadenar decenas de jingles.
 
 Preferencia horaria
 -------------------
@@ -114,6 +118,9 @@ SEPARATOR_KINDS: frozenset[str] = frozenset({"music", "jingle", "stinger", "emer
 
 # Kinds cortos para rellenar hasta una interrupción
 FILLER_KINDS: tuple[str, ...] = ("jingle", "stinger")
+
+# Hueco máximo hasta una interrupción que se rellena con jingles/stingers (s)
+FILLER_MAX_GAP_S = 60.0
 
 # Una canción no se repite dentro de las últimas N canciones (acotado al catálogo)
 MUSIC_REPEAT_PLAYS = 30
@@ -532,7 +539,8 @@ def _pick_music(ctx: _Ctx, rung: int) -> _Pick | None:
         elif tier2:
             options = tier2
         else:
-            filler = _pick_filler(ctx)
+            gap = (ctx.deadline.fire_at - ctx.now).total_seconds()
+            filler = _pick_filler(ctx) if gap <= FILLER_MAX_GAP_S else None
             if filler is not None:
                 return filler
             note += "; ninguna acaba antes de la interrupción"
