@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -19,13 +20,15 @@ from radio.sim import SIM_START, SimReport, run_simulation
 REPO = Path(__file__).parents[2]
 
 
-def simulate(hours: float = 24.0, seed: int = 1, start: datetime = SIM_START) -> SimReport:
+def simulate(hours: float = 24.0, seed: int = 1, start: datetime = SIM_START,
+             **kw: Any) -> SimReport:
     return run_simulation(
         hours=hours,
         seed=seed,
         config=RadioConfig.load(REPO / "config"),
         prompts_dir=REPO / "prompts",
         start=start,
+        **kw,
     )
 
 
@@ -42,14 +45,39 @@ def test_24h_seed1_passes_invariants(report_24h: SimReport) -> None:
     assert r.producer_errors == 0
     assert r.time_signals_aired >= 23
     assert r.time_signals_on_time == r.time_signals_aired
-    assert r.max_talk_ratio_rolling_hour <= r.talk_budget_ratio
+    assert r.max_talk_ratio_rolling_hour <= r.talk_budget_ratio == 0.22
     assert r.music_share > 0.95          # solo música, jingles y señal horaria
     assert r.airtime_s["jingle"] > 0 and r.airtime_s["time_signal"] > 0
     assert r.airtime_s["host_intro"] == 0      # host_intro vuelve en Fase 2
-    assert r.airtime_s["factual"] == 0 and r.airtime_s["fiction"] == 0
     assert r.producer_runs >= 47               # cron */30 durante 24 h
     assert sum(r.airtime_s.values()) >= 24 * 3600
     assert len(r.decisions_sample) > 0
+    # Sin stock de palabra, los huecos talk bajan al peldaño 3 (cualquier música)
+    assert set(r.rung_histogram) == {"1", "2", "3", "4", "5"}
+    assert r.rung_histogram["3"] > 0 and r.rung_histogram["5"] == 0
+    assert sum(r.rung_histogram.values()) == r.units_aired
+
+
+def test_48h_with_synthetic_talk_stock_has_no_gaps() -> None:
+    """§9 integración: simulate de 48 h con stock sintético termina sin huecos."""
+    r = simulate(hours=48, seed=7, talk_stock=True)
+    assert r.passed, r.failures
+    assert r.dead_air_s == 0 and r.rung_histogram["5"] == 0
+    assert r.time_signals_aired >= 47 and r.time_signals_on_time == r.time_signals_aired
+    assert r.fiction_after_factual == 0
+    assert 0.05 < r.max_talk_ratio_rolling_hour <= r.talk_budget_ratio
+    assert r.airtime_s["host_intro"] > 0
+    assert r.segments_aired > r.units_aired          # hay unidades [host_intro, music]
+    assert sum(r.airtime_s.values()) >= 48 * 3600
+
+
+def test_tinydesk_mode_is_music_only() -> None:
+    r = simulate(hours=3, seed=2, mode="tinydesk", talk_stock=True)
+    assert r.passed, r.failures
+    assert r.mode == "tinydesk"
+    talk = {k: v for k, v in r.airtime_s.items() if k not in ("music", "host_intro")}
+    assert all(v == 0 for v in talk.values()), talk
+    assert r.time_signals_expected_min == 0
 
 
 def test_same_seed_is_deterministic(report_24h: SimReport) -> None:

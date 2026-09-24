@@ -16,7 +16,6 @@ from radio.core.clock import FakeClock
 from radio.core.config import ProducersConfig, ProducerSettings, ProviderSettings, RadioConfig
 from radio.core.models import Segment
 from radio.core.playout import Playout
-from radio.core.scheduler import Scheduler
 from radio.core.store import DB
 from radio.providers.audio.null import NullAudioBackend
 from radio.station import build_runner, run_station_loop
@@ -49,8 +48,8 @@ def stop_after(n: int) -> Callable[[], bool]:
 
 def make_playout(db: DB, clock: FakeClock, emergency_dir: Path | None = None) -> Playout:
     return Playout(
-        db, Scheduler(RadioConfig.load(REPO / "config").grid, rng=random.Random(0)),
-        NullAudioBackend(), clock, emergency_dir=emergency_dir,
+        db, RadioConfig.load(REPO / "config").grid,
+        NullAudioBackend(), clock, rng=random.Random(0), emergency_dir=emergency_dir,
     )
 
 
@@ -74,7 +73,9 @@ def test_station_loop_airs_and_runs_producers(tmp_path: Path) -> None:
                              sleep=sleeps.append)
 
     assert aired == 3
-    assert [p.segment_id for p in db.list_play_log()] == ["m0", "m1", "m2"]
+    ids = [p.segment_id for p in db.list_play_log()]
+    assert set(ids) <= {"m0", "m1", "m2"} and len(ids) == 3
+    assert all(a != b for a, b in zip(ids, ids[1:], strict=False))   # nunca el mismo artista seguido
     assert db.stock_view(clock.now()).count("time_signal") == 2   # el producer ha corrido
     assert (tmp_path / "data" / "stock" / "time_signal").is_dir()
     assert sleeps == []

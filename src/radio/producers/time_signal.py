@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from radio.core.ids import new_id
 from radio.core.models import Segment, SegmentKind
-from radio.core.scheduler import TIME_SIGNAL_WINDOW_MIN
+from radio.grid.rules import TIME_SIGNAL_WINDOW_MIN
 from radio.producers.base import ProducerContext, pick_voice, write_segment_audio
 
 # Número de horas futuras con señal preparada si producers.yaml no dice otra cosa

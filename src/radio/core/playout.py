@@ -1,269 +1,268 @@
 """
-Playout de Radio Parra: convierte las decisiones del scheduler en audio en antena.
+Playout de Radio Parra: convierte las unidades del scheduler (``radio.grid``) en audio.
 
-Cada llamada a ``Playout.step()`` emite exactamente un segmento (bloqueante):
+Cada llamada a ``Playout.step()`` emite exactamente una ``PlayUnit`` (bloqueante):
 
-1. Construye el historial reciente (``PlayRecord``) a partir de ``play_log``.
-2. Pregunta al scheduler qué tipo toca (``next_kind``) con el stock emitible
-   (``StockView``: ready y sin caducar).
-3. Elige un segmento concreto de ese tipo (reglas de selección, abajo).
-4. Abre la emisión en ``play_log`` (con el ``mode`` de la emisora), llama a
-   ``audio.play(path)`` y la cierra con la hora real de fin (``clock.now()`` tras
-   volver de ``play``) y ``skipped`` si se cortó.
+1. Construye el ``SchedulerState`` desde la BD: ``play_log`` de los últimos
+   ``history_window`` (por defecto ``history_horizon(grid)``), los segmentos a los que
+   apunta y el cursor del patrón (que vive en memoria: tras reiniciar empieza de 0).
+2. Pide ``next_unit`` con el stock emitible (``StockView``: ready y sin caducar).
+3. Si algún audio de la unidad no existe en disco (``verify_files``), ese segmento
+   pasa a ``quarantined`` y se vuelve a preguntar (máximo ``MAX_ATTEMPTS``).
+4. Emite los segmentos de la unidad uno detrás de otro: abre la emisión en
+   ``play_log`` (con el ``mode``), llama a ``audio.play(path)`` y la cierra con la hora
+   real de fin (``clock.now()`` tras volver) y ``skipped`` si se cortó. Si se corta un
+   segmento, el resto de la unidad no se emite.
 
-Reglas de selección
--------------------
-- ``time_signal``: solo vale la señal emitible etiquetada con la hora local en curso
-  (``hour:YYYY-MM-DDTHH`` en ``meta["tags"]``). Si no hay ninguna, la señal horaria
-  se considera no disponible y se vuelve a preguntar al scheduler sin ella.
-- ``music``: se excluye el artista de la última canción emitida (nunca dos canciones
-  seguidas del mismo artista). Además, si hay preparada la señal de la próxima hora,
-  se prefieren canciones que terminen antes de que se cierre su ventana
-  (minutos 0–4), para no pisar la señal horaria. Si no hay candidatas, se relajan
-  las restricciones en este orden: primero la ventana horaria, luego el artista.
-- Resto de tipos: ``pick_ready(kind)`` (nunca emitido primero, luego el más antiguo).
-- Si el audio no existe en disco (``verify_files``), el segmento pasa a
-  ``quarantined`` y se reintenta la selección (máximo ``MAX_ATTEMPTS`` por paso).
+Tras emitir, la palabra pasa a ``retired``; ``music``, ``jingle`` y ``stinger`` siguen
+``ready`` (rotación). Un segmento cortado sigue ``ready``.
 
-Tras emitir, los segmentos de palabra pasan a ``retired``; ``music`` y ``jingle`` se
-quedan en ``ready`` porque son reutilizables (rotación).
+Peldaño 5 (unidad vacía): se reproduce, sin registrarlo, un audio de ``emergency_dir``
+si lo hay, y ``step()`` devuelve ``None``. ``last_unit`` guarda siempre la última
+unidad decidida (también la de emergencia) y ``last_emergency`` el audio usado.
 
-Si no hay nada que emitir, se reproduce (sin registrarlo como segmento) un audio de
-``emergency_dir`` si lo hay, y ``step()`` devuelve ``None``.
+La emisora definitiva (cola con lookahead, cortes por interrupción) se construirá
+sobre ``radio.grid`` directamente; este playout secuencial es el de Fase 1 y el que
+usa ``radio simulate``.
 
 Simulación
 ----------
 El Playout no calcula duraciones: mide el tiempo real con ``clock.now()`` antes y
-después de ``audio.play``. En simulación, el backend de audio (``SimAudioBackend``
-en ``radio.sim``) avanza el ``FakeClock`` la duración del segmento, de modo que las
-filas de ``play_log`` quedan con ``started_at``/``ended_at`` correctos en tiempo simulado.
+después de ``audio.play``. En simulación, ``SimAudioBackend`` (``radio.sim``) avanza el
+``FakeClock`` la duración del segmento.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+import random
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
 from radio.core.clock import Clock
-from radio.core.models import PlayLogEntry, Segment, SegmentKind
-from radio.core.scheduler import TIME_SIGNAL_WINDOW_MIN, PlayRecord, Scheduler
+from radio.core.config import GridConfig
+from radio.core.models import Segment, SegmentKind, Status
 from radio.core.store import DB
+from radio.grid.scheduler import (
+    RUNG_EMERGENCY,
+    PlayUnit,
+    SchedulerState,
+    advance_pattern,
+    history_horizon,
+    next_unit,
+)
 from radio.music.library import AUDIO_EXTENSIONS
-from radio.producers.time_signal import hour_tag
 from radio.providers.audio.base import AudioBackend
 
 logger = logging.getLogger(__name__)
 
-# Intentos máximos de selección por paso (tipos descartados + audios que faltan)
+# Intentos máximos de decisión por paso (audios que faltan)
 MAX_ATTEMPTS = 6
 
 # Tipos que siguen "ready" tras emitirse (se reutilizan en rotación)
-REUSABLE_KINDS: frozenset[str] = frozenset({"music", "jingle"})
-
-# Margen para que una canción termine estrictamente dentro de la ventana de la señal
-_DEADLINE_MARGIN_S = 1.0
-
-ARTIST_PREFIX = "artist:"
+REUSABLE_KINDS: frozenset[str] = frozenset({"music", "jingle", "stinger"})
 
 
 @dataclass(frozen=True)
-class PlayOutcome:
-    """Resultado de un paso de playout: qué se ha emitido y por qué."""
+class AiredSegment:
+    """Un segmento emitido dentro de una unidad."""
     segment_id: str
     kind: SegmentKind
     title: str
     started_at: datetime
     duration_s: float
-    reason: str
+    skipped: bool = False
+
+
+@dataclass(frozen=True)
+class PlayOutcome:
+    """
+    Resultado de un paso: la unidad emitida, por qué y cada segmento que sonó.
+    ``segment_id``/``kind``/``title``/``started_at``/``duration_s`` describen el
+    segmento principal (el último de la unidad, p. ej. la música tras su intro).
+    """
+    unit: PlayUnit
+    aired: tuple[AiredSegment, ...]
+
+    @property
+    def reason(self) -> str:
+        return self.unit.reason
+
+    @property
+    def rung(self) -> int:
+        return self.unit.rung
+
+    @property
+    def main(self) -> AiredSegment:
+        return self.aired[-1]
+
+    @property
+    def segment_id(self) -> str:
+        return self.main.segment_id
+
+    @property
+    def kind(self) -> SegmentKind:
+        return self.main.kind
+
+    @property
+    def title(self) -> str:
+        return self.main.title
+
+    @property
+    def started_at(self) -> datetime:
+        return self.aired[0].started_at
+
+    @property
+    def duration_s(self) -> float:
+        return sum(a.duration_s for a in self.aired)
 
 
 class Playout:
-    """Bucle de emisión: scheduler → selección de segmento → audio → registro en BD."""
+    """Bucle de emisión: ``next_unit`` → verificación de audio → emisión → registro."""
 
     def __init__(
         self,
         db: DB,
-        scheduler: Scheduler,
+        grid: GridConfig,
         audio: AudioBackend,
         clock: Clock,
         *,
-        tz: str = "Europe/Madrid",
+        tz: str | None = None,
         mode: str = "default",
+        rng: random.Random | None = None,
         verify_files: bool = True,
-        history_window_min: int = 120,
+        history_window: timedelta | None = None,
         emergency_dir: Path | None = None,
     ) -> None:
         self.db = db
-        self.scheduler = scheduler
+        self.grid = grid
         self.audio = audio
         self.clock = clock
-        self.tz = ZoneInfo(tz)
+        self.tz = ZoneInfo(tz or grid.timezone)
         self.mode = mode
+        self.rng = rng if rng is not None else random.Random()
         self.verify_files = verify_files
-        self.history_window = timedelta(minutes=history_window_min)
+        self.history_window = history_window if history_window is not None else history_horizon(grid)
         self.emergency_dir = emergency_dir
-        # Último audio de emergencia emitido en el paso actual (None si no hubo)
+        self.pattern_pos: Mapping[str, int] = MappingProxyType({})
+        # Última unidad decidida (también la de emergencia) y audio de emergencia usado
+        self.last_unit: PlayUnit | None = None
         self.last_emergency: Path | None = None
         self._emergency_index = 0
         self._interrupted = False
+        self._cache: dict[str, Segment] = {}
 
     # ── API pública ──────────────────────────────────────────────────────────
 
+    def state(self, now: datetime) -> SchedulerState:
+        """Estado del scheduler reconstruido desde la BD en ``now``."""
+        history = tuple(self.db.list_play_log(since=now - self.history_window))
+        segments: dict[str, Segment] = {}
+        for entry in history:
+            sid = entry.segment_id
+            if sid is None or sid in segments:
+                continue
+            seg = self._cache.get(sid) or self.db.get_segment(sid)
+            if seg is not None:
+                self._cache[sid] = seg
+                segments[sid] = seg
+        return SchedulerState(
+            grid=self.grid,
+            history=history,
+            pattern_pos=self.pattern_pos,
+            segments=MappingProxyType(segments),
+        )
+
+    def decide(self, now: datetime | None = None) -> PlayUnit:
+        """Decide la próxima unidad sin emitirla (sin verificar audios)."""
+        now = self._now() if now is None else now
+        return next_unit(self.state(now), self.db.stock_view(now), now, self.mode, self.rng)
+
     def step(self) -> PlayOutcome | None:
-        """Emite un segmento (bloqueante). ``None`` si no había nada que emitir."""
+        """Emite una unidad (bloqueante). ``None`` si tocó emergencia (peldaño 5)."""
         self.last_emergency = None
         now = self._now()
-        plays = self._recent_plays(now)
-        history = [self._to_record(p) for p in plays]
-        discarded: set[str] = set()
-
+        state = self.state(now)
         for _ in range(MAX_ATTEMPTS):
             stock = self.db.stock_view(now)
-            available = {k: stock.count(k) for k in stock.kinds() if k not in discarded}
-            kind = self.scheduler.next_kind(now, history, available)
-            if kind is None:
+            unit = next_unit(state, stock, now, self.mode, self.rng)
+            if unit.is_emergency or self._all_files_present(unit):
                 break
-            reason = self.scheduler.explain()
-            seg = self._select(kind, now, plays)
-            if seg is None:
-                logger.info("Sin segmento válido de tipo %s; se descarta en este paso", kind)
-                discarded.add(kind)
-                continue
-            if self.verify_files and not seg.path.is_file():
-                logger.warning(
-                    "Audio no encontrado para %s (%s): %s → status 'quarantined'",
-                    seg.id, seg.title, seg.path,
-                )
-                self.db.update_segment_status(seg.id, "quarantined")
-                continue
-            return self._air(seg, kind, reason)
-
-        self._play_emergency()
-        return None
+        else:
+            unit = PlayUnit(
+                (), f"audios ausentes tras {MAX_ATTEMPTS} intentos", RUNG_EMERGENCY, mode=self.mode
+            )
+        self.last_unit = unit
+        if unit.is_emergency:
+            logger.warning("Peldaño 5 (%s): %s", unit.mode, unit.reason)
+            self._play_emergency()
+            return None
+        outcome = self._air(unit)
+        self.pattern_pos = advance_pattern(self.pattern_pos, unit)
+        return outcome
 
     def interrupt(self) -> None:
         """Corta el audio en curso (p. ej. al recibir SIGINT/SIGTERM)."""
         self._interrupted = True
         self.audio.skip()
 
-    # ── Historial ────────────────────────────────────────────────────────────
+    # ── Internos ─────────────────────────────────────────────────────────────
 
     def _now(self) -> datetime:
-        return self._aware(self.clock.now())
-
-    def _aware(self, t: datetime) -> datetime:
-        """Fecha aware; una naive se interpreta como hora local de la emisora."""
+        t = self.clock.now()
         return t.replace(tzinfo=self.tz) if t.tzinfo is None else t
 
-    def _recent_plays(self, now: datetime) -> list[PlayLogEntry]:
-        """Emisiones empezadas dentro de la ventana de historial (más antigua primero)."""
-        return self.db.list_play_log(since=now - self.history_window)
+    def _all_files_present(self, unit: PlayUnit) -> bool:
+        """Pone en cuarentena los segmentos sin audio; True si no faltaba ninguno."""
+        if not self.verify_files:
+            return True
+        ok = True
+        for seg in unit.segments:
+            if not seg.path.is_file():
+                logger.warning(
+                    "Audio no encontrado para %s (%s): %s → status 'quarantined'",
+                    seg.id, seg.title, seg.path,
+                )
+                self._set_status(seg.id, "quarantined")
+                ok = False
+        return ok
 
-    @staticmethod
-    def _to_record(play: PlayLogEntry) -> PlayRecord:
-        """PlayRecord con la duración real si la emisión está cerrada."""
-        duration = play.duration_s or 0.0
-        if play.ended_at is not None:
-            duration = (play.ended_at - play.started_at).total_seconds()
-        return PlayRecord(kind=play.kind, started_at=play.started_at, duration_s=duration)
+    def _set_status(self, seg_id: str, status: Status) -> None:
+        self.db.update_segment_status(seg_id, status)
+        self._cache.pop(seg_id, None)
 
-    # ── Selección ────────────────────────────────────────────────────────────
-
-    def _select(
-        self, kind: SegmentKind, now: datetime, plays: Sequence[PlayLogEntry]
-    ) -> Segment | None:
-        match kind:
-            case "time_signal":
-                return self._ready_time_signal(now.astimezone(self.tz), now)
-            case "music":
-                return self._select_music(now, plays)
-            case _:
-                return self.db.pick_ready(kind, now=now)
-
-    def _ready_time_signal(self, hour: datetime, now: datetime) -> Segment | None:
-        """Señal horaria emitible en `now` etiquetada con la hora local de `hour` (o None)."""
-        seg = self.db.find_by_meta("time_signal", "tags", hour_tag(hour), status="ready")
-        return seg if seg is not None and seg.is_live(now) else None
-
-    def _select_music(self, now: datetime, plays: Sequence[PlayLogEntry]) -> Segment | None:
-        exclude = self._last_music_artist_tags(plays)
-        max_dur = self._music_deadline_s(now)
-        attempts: list[tuple[list[str], float | None]] = [
-            (exclude, max_dur), (exclude, None), ([], max_dur), ([], None),
-        ]
-        seen: set[tuple[tuple[str, ...], float | None]] = set()
-        for tags, limit in attempts:
-            key = (tuple(tags), limit)
-            if key in seen:
-                continue
-            seen.add(key)
-            seg = self.db.pick_ready("music", now=now, exclude_tags=tags, max_duration_s=limit)
-            if seg is not None:
-                return seg
-        return None
-
-    def _last_music_artist_tags(self, plays: Sequence[PlayLogEntry]) -> list[str]:
-        """Etiquetas artist:* de la última canción emitida dentro de la ventana."""
-        for play in reversed(plays):
-            if play.kind != "music":
-                continue
-            seg = self.db.get_segment(play.segment_id) if play.segment_id else None
-            if seg is None:
-                return []
-            return [t for t in seg.tags if t.startswith(ARTIST_PREFIX)]
-        return []
-
-    def _music_deadline_s(self, now: datetime) -> float | None:
-        """
-        Segundos máximos que puede durar una canción para no pisar la próxima señal
-        horaria (debe terminar antes del minuto ``TIME_SIGNAL_WINDOW_MIN``).
-        None si la señal está desactivada o no hay señal preparada para esa hora.
-        """
-        if not self.scheduler.grid.time_signal_enabled:
-            return None
-        local = now.astimezone(self.tz)
-        # Aritmética en UTC para respetar los cambios de horario
-        top = local.replace(minute=0, second=0, microsecond=0).astimezone(UTC)
-        next_hour = (top + timedelta(hours=1)).astimezone(self.tz)
-        if self._ready_time_signal(next_hour, now) is None:
-            return None
-        deadline = next_hour + timedelta(minutes=TIME_SIGNAL_WINDOW_MIN)
-        return (deadline - now).total_seconds() - _DEADLINE_MARGIN_S
-
-    # ── Emisión ──────────────────────────────────────────────────────────────
-
-    def _air(self, seg: Segment, kind: SegmentKind, reason: str) -> PlayOutcome:
-        started = self._now()
-        play_id = self.db.log_play_start(seg.id, kind, self.mode, started)
-        outcome = PlayOutcome(
-            segment_id=seg.id,
-            kind=kind,
-            title=seg.title,
-            started_at=started,
-            duration_s=seg.duration_s,
-            reason=reason,
-        )
-        logger.info(
-            "En antena %s [%s] %s (%.0f s) — %s",
-            started.astimezone(self.tz).strftime("%H:%M:%S"),
-            kind, outcome.title, outcome.duration_s, reason,
-        )
-        self._interrupted = False
-        try:
-            self.audio.play(seg.path)
-        except Exception:
-            logger.exception("Error reproduciendo %s", seg.path)
-            self._interrupted = True
-        interrupted = self._interrupted
-        self.db.log_play_end(play_id, self._now(), skipped=interrupted)
-        # Un segmento de palabra interrumpido sigue "ready" para poder emitirse después
-        if kind not in REUSABLE_KINDS and not interrupted:
-            self.db.update_segment_status(seg.id, "retired")
-        return outcome
+    def _air(self, unit: PlayUnit) -> PlayOutcome:
+        aired: list[AiredSegment] = []
+        for seg in unit.segments:
+            started = self._now()
+            play_id = self.db.log_play_start(seg.id, seg.kind, self.mode, started)
+            logger.info(
+                "En antena %s [%s] %s (%.0f s) — peldaño %d — %s",
+                started.astimezone(self.tz).strftime("%H:%M:%S"),
+                seg.kind, seg.title, seg.duration_s, unit.rung, unit.reason,
+            )
+            self._interrupted = False
+            try:
+                self.audio.play(seg.path)
+            except Exception:
+                logger.exception("Error reproduciendo %s", seg.path)
+                self._interrupted = True
+            interrupted = self._interrupted
+            self.db.log_play_end(play_id, self._now(), skipped=interrupted)
+            aired.append(AiredSegment(
+                segment_id=seg.id, kind=seg.kind, title=seg.title, started_at=started,
+                duration_s=seg.duration_s, skipped=interrupted,
+            ))
+            # Un segmento de palabra interrumpido sigue "ready" para poder emitirse después
+            if interrupted:
+                break
+            if seg.kind not in REUSABLE_KINDS:
+                self._set_status(seg.id, "retired")
+        return PlayOutcome(unit=unit, aired=tuple(aired))
 
     def _play_emergency(self) -> None:
         """Reproduce un audio de emergencia (rotando) si hay alguno disponible."""
@@ -280,3 +279,4 @@ class Playout:
         logger.warning("Nada que emitir: audio de emergencia %s", path.name)
         self.last_emergency = path
         self.audio.play(path)
+
