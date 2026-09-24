@@ -1,5 +1,9 @@
 """
-Importación de una biblioteca musical local (p. ej. audios de conciertos Tiny Desk).
+Importación de una biblioteca musical local — **herramienta de desarrollo/offline**.
+
+Sirve para probar la emisora sin red con audios que la dueña ya tiene. No es una vía
+de entrada de música para la radio real: §7 fija que la música solo llega por el feed
+RSS oficial (productor ``music_tinydesk``).
 
 Recorre un directorio, lee duración y etiquetas con mutagen y registra cada pista
 como segmento `kind="music"` en estado `ready`. La importación es idempotente:
