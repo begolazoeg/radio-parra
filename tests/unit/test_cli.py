@@ -80,3 +80,51 @@ def test_doctor_reports_schema_version(tmp_path: Path, monkeypatch: pytest.Monke
     DB(tmp_path / "data" / "state.db").close()
     result = CliRunner().invoke(app, ["doctor", "--config-dir", str(REPO / "config")])
     assert "esquema v1" in result.output
+
+
+def test_doctor_checks_phase1_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    result = CliRunner().invoke(app, ["doctor", "--config-dir", str(REPO / "config")])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    for label in ("mpv", "ffmpeg", "data/ escribible", "data/ espacio libre",
+                  "bucle de emergencia", "emergency_loop.wav", "productores activos",
+                  "https://feeds.npr.org/510306/podcast.xml", ".env"):
+        assert label in out, label
+    assert "feed accesible" not in out            # sin --network no hay red
+
+
+def test_doctor_flags_missing_feed_url_and_emergency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "producers.yaml").write_text(
+        "producers:\n  music_tinydesk: {active: true, params: {}}\n", encoding="utf-8"
+    )
+    (config / "station.yaml").write_text(
+        "playout: {emergency_dir: nada}\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["doctor", "--config-dir", str(config)])
+    lines = {line.split("] ", 1)[1].split(" — ")[0]: line for line in result.output.splitlines()
+             if "] " in line}
+    assert "ERROR" in lines["music_tinydesk feed_url"]
+    assert "ERROR" in lines["bucle de emergencia (nada)"]
+
+
+def test_doctor_network_heads_the_feed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    calls: list[str] = []
+
+    def fake_head(url: str, **_kw: object) -> httpx.Response:
+        calls.append(url)
+        return httpx.Response(200, request=httpx.Request("HEAD", url))
+
+    monkeypatch.setattr(httpx, "head", fake_head)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["doctor", "--network", "--config-dir", str(REPO / "config")])
+    assert calls == ["https://feeds.npr.org/510306/podcast.xml"]
+    assert "feed accesible — HTTP 200" in result.output

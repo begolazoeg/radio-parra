@@ -14,15 +14,19 @@ import typer
 app = typer.Typer(help="Radio Parra — radio casera con locutor IA")
 
 
-def _check(label: str, ok: bool, warn: bool = False, msg: str = "") -> None:
-    """Imprime una línea de diagnóstico con formato OK / WARN / ERROR."""
+def _check(label: str, ok: bool, warn: bool = False, msg: str = "", info: str = "") -> None:
+    """
+    Imprime una línea de diagnóstico con formato OK / WARN / ERROR. ``msg`` se muestra
+    si falla; ``info``, si va bien (o si falla y no hay ``msg``).
+    """
     if ok:
         status = typer.style("OK   ", fg=typer.colors.GREEN, bold=True)
     elif warn:
         status = typer.style("WARN ", fg=typer.colors.YELLOW, bold=True)
     else:
         status = typer.style("ERROR", fg=typer.colors.RED, bold=True)
-    suffix = f" — {msg}" if msg else ""
+    text = info if ok else (msg or info)
+    suffix = f" — {text}" if text else ""
     typer.echo(f"[{status}] {label}{suffix}")
 
 
@@ -40,47 +44,72 @@ def _cmd_exists(cmd: str) -> bool:
         return False
 
 
+# Espacio libre mínimo en data/ antes de avisar / dar error (MB)
+DOCTOR_FREE_WARN_MB = 1024
+DOCTOR_FREE_ERROR_MB = 200
+
+
 @app.command()
 def doctor(
     config_dir: Path = typer.Option(  # noqa: B008
         Path("config"), "--config-dir", help="Directorio de configuración"
     ),
+    network: bool = typer.Option(
+        False, "--network", help="Comprueba también que el feed de música responde (HEAD)"
+    ),
 ) -> None:
     """
-    Diagnóstico del entorno: comprueba dependencias, dirs, configuración y BD.
+    Diagnóstico del entorno (§9): mpv, ffmpeg, configuración, datos, BD, bucle de
+    emergencia, feed de música y productores. Sin red salvo con --network.
     """
+    import shutil  # noqa: PLC0415
+
     from radio.core.config import RadioConfig  # noqa: PLC0415
     from radio.core.paths import db_path  # noqa: PLC0415
-    from radio.core.store import DB  # noqa: PLC0415
+    from radio.core.store import DB, SCHEMA_VERSION  # noqa: PLC0415
+    from radio.music.library import AUDIO_EXTENSIONS  # noqa: PLC0415
+    from radio.producers.registry import PRODUCERS  # noqa: PLC0415
+    from radio.station.engine import resolve_emergency_dir  # noqa: PLC0415
 
     typer.echo("Radio Parra — doctor\n")
 
-    # ffmpeg
-    _check("ffmpeg", _cmd_exists("ffmpeg"))
-    # mpv
-    _check("mpv", _cmd_exists("mpv"))
-    # Python version
+    # Python
     major, minor = sys.version_info[:2]
     _check(f"Python {major}.{minor}", major == 3 and minor >= 12, msg="requiere 3.12+")
 
-    # .env
-    env_file = Path(".env")
-    _check(".env", env_file.exists(), warn=True, msg="copia .env.example → .env")
-
-    # Config válida
-    data_dir = Path("data")
+    # Configuración
+    config = None
     try:
         config = RadioConfig.load(config_dir)
-        data_dir = Path(config.station.data_dir)
         _check(f"{config_dir}/", True)
     except Exception as exc:
         _check(f"{config_dir}/", False, msg=str(exc))
 
-    # Directorio de datos y BD
-    _check(f"{data_dir}/", data_dir.is_dir(), warn=True, msg=f"ejecuta mkdir {data_dir}/ si falta")
-    if data_dir.is_dir():
-        writable = os.access(data_dir, os.W_OK)
-        _check(f"{data_dir}/ escribible", writable, msg="sin permiso de escritura")
+    # Reproductor y postproducción
+    mpv_bin = config.station.audio.mpv_bin if config else "mpv"
+    _check(f"mpv ({mpv_bin})", _cmd_exists(mpv_bin),
+           msg="la emisora no puede sonar sin mpv (apt install mpv)")
+    _check("ffmpeg", _cmd_exists("ffmpeg"), warn=True,
+           msg="sin ffmpeg no hay normalización de volumen (post)")
+
+    # .env (claves; en Fase 1 solo hay proveedores fake)
+    _check(".env", Path(".env").exists(), warn=True, msg="copia .env.example → .env")
+
+    # Directorio de datos: existe, escribible y con espacio
+    data_dir = Path(config.station.data_dir) if config else Path("data")
+    if not data_dir.is_dir():
+        _check(f"{data_dir}/", False, warn=True, msg="no existe; se crea al arrancar")
+    else:
+        _check(f"{data_dir}/ escribible", os.access(data_dir, os.W_OK),
+               msg="sin permiso de escritura")
+        free_mb = shutil.disk_usage(data_dir).free / 1024 / 1024
+        _check(
+            f"{data_dir}/ espacio libre", free_mb >= DOCTOR_FREE_WARN_MB,
+            warn=free_mb >= DOCTOR_FREE_ERROR_MB, info=f"{free_mb:.0f} MB",
+            msg=f"{free_mb:.0f} MB (la caché de Tiny Desk necesita espacio)",
+        )
+
+    # BD y versión de esquema
     state_db = db_path(data_dir)
     if not state_db.exists():
         _check(str(state_db), False, warn=True, msg="no existe; se crea al arrancar")
@@ -88,9 +117,50 @@ def doctor(
         try:
             with DB(state_db) as db:
                 version = db.schema_version
-            _check(str(state_db), True, msg=f"esquema v{version}")
+            _check(str(state_db), version == SCHEMA_VERSION, info=f"esquema v{version}",
+                   msg=f"esquema v{version}, se espera v{SCHEMA_VERSION}")
         except Exception as exc:
             _check(str(state_db), False, msg=str(exc))
+
+    if config is None:
+        return
+
+    # Bucle de emergencia (§8, inv. 3)
+    emergency = resolve_emergency_dir(config)
+    files = sorted(p.name for p in emergency.glob("*") if p.suffix.lower() in AUDIO_EXTENSIONS) \
+        if emergency.is_dir() else []
+    _check(f"bucle de emergencia ({emergency})", bool(files), info=", ".join(files),
+           msg="sin audio: la radio podría quedar muda")
+
+    # Productores (los ejecuta el timer `radio produce --all`, no la emisora)
+    active = [n for n, st in config.producers.producers.items() if st.active]
+    unknown = [n for n in active if n not in PRODUCERS]
+    _check("productores activos", bool(active) and not unknown, warn=not unknown,
+           info=", ".join(active),
+           msg=f"sin implementar: {', '.join(unknown)}" if unknown
+           else "ninguno: no entrará stock nuevo")
+
+    # Feed de música (decisión #8)
+    tinydesk = config.producers.get("music_tinydesk")
+    feed_url = (tinydesk.params.get("feed_url") if tinydesk else None) or ""
+    if tinydesk is None or not tinydesk.active:
+        _check("music_tinydesk", False, warn=True, msg="inactivo: no entrará música nueva")
+    else:
+        _check("music_tinydesk feed_url", bool(feed_url), info=feed_url,
+               msg="sin configurar (producers.yaml → music_tinydesk.params.feed_url)")
+    if network and feed_url:
+        import httpx  # noqa: PLC0415
+
+        from radio.music.feed import USER_AGENT  # noqa: PLC0415
+
+        try:
+            resp = httpx.head(feed_url, headers={"User-Agent": USER_AGENT},
+                              timeout=10.0, follow_redirects=True)
+            _check("feed accesible", resp.status_code < 400, warn=True,
+                   info=f"HTTP {resp.status_code}", msg=f"HTTP {resp.status_code}")
+        except httpx.HTTPError as exc:
+            _check("feed accesible", False, warn=True,
+                   msg=f"{exc} (sin red la emisora sigue sonando desde el stock)")
 
 
 @app.command()
