@@ -18,18 +18,56 @@ budget:
 # Nivel de loudness objetivo (EBU R128)
 loudness_lufs: -16.0
 
+# Proveedores (§4.1, inv. 6). Los ejecutan solo los productores (`radio produce`),
+# nunca la emisora (inv. 2). Si falta algo (clave, binario, modelo de voz), el
+# productor que lo necesita registra el error en producer_runs y la música sigue.
 providers:
   llm:
-    name: "anthropic"
-    model: "claude-haiku-4-5-20251001"
+    # Claude por la API oficial (alias: anthropic). "fake" para probar sin red.
+    # Credenciales: ANTHROPIC_API_KEY (en .env, que systemd carga) o `ant auth login`.
+    name: "claude"
+    model: "claude-sonnet-5"   # decisión de la dueña (2026-09-24)
+    extra:
+      # Pensamiento adaptativo con esfuerzo bajo (ver radio/providers/llm/claude.py):
+      # evita que se cuelen etiquetas de razonamiento en un texto que se locuta.
+      # "disabled" es más barato y predecible si todo se pide con esquema JSON.
+      thinking: "adaptive"
+      effort: "low"
+      min_max_tokens_adaptive: 2000   # el pensamiento cuenta dentro de max_tokens
+      timeout_s: 60
+      max_retries: 2                  # el SDK reintenta 408/409/429/5xx y red
+      # Cambio USD→EUR aproximado para la regla de gasto (actualizar a mano).
+      usd_to_eur: 0.92
+      # Precios USD por millón de tokens (cacheados 2026-06; VERIFICAR). Se pueden
+      # sobrescribir aquí, p. ej.:
+      # prices: {claude-sonnet-5: {input: 2.0, output: 10.0}}
   tts:
-    name: "elevenlabs"
+    # TTS local y offline por defecto (decisión #3, 2026-09-24). Alternativas:
+    # "cloud"/"elevenlabs" (implementado pero desactivado; necesita
+    # ELEVENLABS_API_KEY y verificar la API antes de usarlo) y "fake".
+    name: "piper"
+    extra:
+      binary: "piper"                 # ruta o nombre en el PATH
+      models_dir: "data/models/piper" # modelos .onnx + .onnx.json, instalados a mano
+      args: []                        # p. ej. ["--length_scale", "1.05"]
+      timeout_s: 120
+      # Caché por hash(texto + voz + proveedor): no se sintetiza dos veces lo mismo
+      cache_dir: "data/cache/tts"
 
 # ── Emisora (radio station, §4.4) ─────────────────────────────────────────────
 # Salida de audio: lo único que cambia entre el portátil y la Pi (§1 inv. 10).
 audio:
   mpv_bin: "mpv"
   mpv_args: []               # p. ej. ["--audio-device=alsa/plughw:CARD=sndrpihifiberry"]
+  # Normalización en reproducción: cada archivo suena con una ganancia propia hacia
+  # loudness_lufs, calculada con la medida guardada en meta (loudness_lufs y
+  # true_peak_db). El archivo NO se toca: la música de Tiny Desk no se puede
+  # modificar (ADR 0002). La palabra ya sale normalizada de `post` (0 dB).
+  # Stock antiguo sin medida: `radio analyze-loudness --missing-only`.
+  normalize: true
+  gain_min_db: -12.0         # como mucho se baja 12 dB...
+  gain_max_db: 6.0           # ...y se sube 6 dB
+  true_peak_ceiling_db: -1.0 # pico verdadero + ganancia nunca por encima de −1 dBTP
 
 # Interrupciones de la parrilla (señal horaria, grid.yaml → interrupts)
 interrupts:

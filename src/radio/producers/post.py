@@ -10,6 +10,19 @@ Postproducción de audio (§4.2, paso 5 del pipeline).
 - ``NullPost``: no hace nada (tests, simulación o máquinas sin ffmpeg).
 - ``choose_post(config)``: ffmpeg si está en el PATH; si no, ``NullPost`` con aviso.
 
+Análisis de loudness **sin recodificar** (normalización en reproducción):
+
+- ``AudioAnalyzer``: protocolo. ``analyze(path)`` mide el loudness integrado (LUFS) y
+  el pico verdadero (dBTP) de un archivo sin tocarlo. Lo usa ``music_tinydesk``: los
+  términos de NPR no permiten modificar el audio (``loudnorm: false``), así que la
+  emisora iguala el volumen al reproducir con una ganancia por archivo
+  (``radio.station.gain``) calculada a partir de esta medida.
+- ``FfmpegLoudnessAnalyzer``: una pasada de ``ffmpeg -af ebur128=peak=true`` (o
+  ``loudnorm=print_format=json``) con salida a ``-f null``; se lee el resumen de stderr.
+- ``NullAnalyzer``: no mide (devuelve ``None``: sin medida → ganancia 0 dB).
+- ``choose_analyzer()``: ffmpeg si está en el PATH; si no, ``NullAnalyzer``.
+- ``analyze_stock(db, analyzer)``: mide el stock ya registrado (``radio analyze-loudness``).
+
 El ejecutable se invoca con ``subprocess`` (sin shell) a través de un ``runner``
 inyectable, de modo que los tests comprueban los argumentos sin tener ffmpeg.
 """
@@ -18,17 +31,20 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 import mutagen
 
 from radio.core.config import RadioConfig
 from radio.core.models import AudioInfo
+from radio.core.store import DB
 
 logger = logging.getLogger(__name__)
 
@@ -188,3 +204,192 @@ def choose_post(config: RadioConfig, *, which: Callable[[str], str | None] = shu
         )
         return NullPost()
     return FfmpegLoudnorm(config.station.loudness_lufs, ffmpeg=ffmpeg)
+
+
+# ── Análisis de loudness (sin recodificar) ────────────────────────────────────
+
+AnalysisMethod = Literal["ebur128", "loudnorm"]
+
+# Resumen final de ``ebur128``: el último bloque "Summary:" de stderr
+_EBUR128_I_RE = re.compile(
+    r"Integrated loudness:\s*I:\s*(?P<i>-?(?:inf|nan|\d+(?:\.\d+)?))\s*LUFS", re.IGNORECASE
+)
+_EBUR128_TP_RE = re.compile(
+    r"True peak:\s*Peak:\s*(?P<tp>-?(?:inf|nan|\d+(?:\.\d+)?))\s*dBFS", re.IGNORECASE
+)
+# Por debajo de esto el archivo es prácticamente silencio: la medida no sirve
+MIN_MEASURABLE_LUFS = -70.0
+
+
+@dataclass(frozen=True)
+class LoudnessMeasurement:
+    """Loudness integrado (LUFS) y pico verdadero (dBTP; ``None`` si no se midió)."""
+    integrated_lufs: float
+    true_peak_db: float | None = None
+
+
+def _finite(raw: str) -> float | None:
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def parse_ebur128_summary(stderr: str) -> LoudnessMeasurement:
+    """
+    Extrae I (LUFS) y el pico verdadero del resumen que ``ebur128`` imprime al final
+    de stderr. Solo se mira lo que sigue al último ``Summary:`` (las líneas por trama,
+    si las hay, no cuentan). ``PostError`` si no hay resumen o el loudness no es finito.
+    """
+    idx = stderr.rfind("Summary:")
+    if idx < 0:
+        raise PostError("ffmpeg no ha devuelto el resumen de ebur128")
+    summary = stderr[idx:]
+    m_i = _EBUR128_I_RE.search(summary)
+    if m_i is None:
+        raise PostError("resumen de ebur128 sin loudness integrado")
+    lufs = _finite(m_i.group("i"))
+    if lufs is None or lufs <= MIN_MEASURABLE_LUFS:
+        raise PostError(f"loudness integrado no medible: {m_i.group('i')} LUFS")
+    m_tp = _EBUR128_TP_RE.search(summary)
+    peak = _finite(m_tp.group("tp")) if m_tp is not None else None
+    return LoudnessMeasurement(lufs, peak)
+
+
+def parse_loudnorm_summary(stderr: str) -> LoudnessMeasurement:
+    """Igual que ``parse_ebur128_summary`` pero con el JSON de ``loudnorm``."""
+    measured = FfmpegLoudnorm.parse_measurement(stderr)
+    lufs = _finite(measured["input_i"])
+    if lufs is None or lufs <= MIN_MEASURABLE_LUFS:
+        raise PostError(f"loudness integrado no medible: {measured['input_i']} LUFS")
+    return LoudnessMeasurement(lufs, _finite(measured["input_tp"]))
+
+
+def parse_loudness(stderr: str) -> LoudnessMeasurement:
+    """Detecta el formato (resumen de ``ebur128`` o JSON de ``loudnorm``) y lo interpreta."""
+    if "Summary:" in stderr:
+        return parse_ebur128_summary(stderr)
+    return parse_loudnorm_summary(stderr)
+
+
+@runtime_checkable
+class AudioAnalyzer(Protocol):
+    """Mide el loudness de un archivo sin modificarlo."""
+
+    def analyze(self, path: Path) -> LoudnessMeasurement | None:
+        """Medida del archivo; ``None`` si este analizador no mide. ``PostError`` si falla."""
+        ...
+
+
+class NullAnalyzer:
+    """No mide nada (máquinas sin ffmpeg, tests): la ganancia en antena será 0 dB."""
+
+    def analyze(self, path: Path) -> LoudnessMeasurement | None:
+        return None
+
+
+class FfmpegLoudnessAnalyzer:
+    """
+    Una sola pasada de ffmpeg de solo lectura (``-f null -``: no escribe audio).
+
+    - ``ebur128`` (por defecto): ``-af ebur128=peak=true:framelog=verbose``. Con
+      ``framelog=verbose`` las líneas por trama (10 por segundo: miles en un concierto)
+      no salen con el nivel de log por defecto; solo el resumen.
+    - ``loudnorm``: ``-af loudnorm=print_format=json`` (la misma medida que la primera
+      pasada de ``FfmpegLoudnorm``). Alternativa si el ffmpeg de la máquina no acepta
+      ``framelog``.
+    """
+
+    def __init__(
+        self,
+        *,
+        ffmpeg: str = "ffmpeg",
+        method: AnalysisMethod = "ebur128",
+        runner: CommandRunner | None = None,
+    ) -> None:
+        self.ffmpeg = ffmpeg
+        self.method: AnalysisMethod = method
+        self.runner: CommandRunner = runner or _run_subprocess
+
+    def args(self, path: Path) -> list[str]:
+        """Argumentos de la pasada de medida."""
+        if self.method == "loudnorm":
+            filt = f"loudnorm=I=-16:TP={TRUE_PEAK_DB}:LRA={LOUDNESS_RANGE}:print_format=json"
+        else:
+            filt = "ebur128=peak=true:framelog=verbose"
+        return [
+            self.ffmpeg, "-hide_banner", "-nostats", "-nostdin", "-i", str(path),
+            "-vn", "-af", filt, "-f", "null", "-",
+        ]
+
+    def analyze(self, path: Path) -> LoudnessMeasurement:
+        code, stderr = self.runner(self.args(path))
+        if code != 0:
+            raise PostError(f"ffmpeg (análisis) salió con {code}: {stderr[-500:]}")
+        return parse_loudness(stderr)
+
+
+def choose_analyzer(*, which: Callable[[str], str | None] | None = None) -> AudioAnalyzer:
+    """``FfmpegLoudnessAnalyzer`` si ffmpeg está instalado; si no, ``NullAnalyzer`` con aviso."""
+    ffmpeg = (which or shutil.which)("ffmpeg")
+    if ffmpeg is None:
+        logger.warning(
+            "ffmpeg no está instalado: no se mide el loudness (ganancia en antena 0 dB)"
+        )
+        return NullAnalyzer()
+    return FfmpegLoudnessAnalyzer(ffmpeg=ffmpeg)
+
+
+# ── Análisis del stock existente (``radio analyze-loudness``) ──────────────────
+
+@dataclass
+class AnalyzeReport:
+    """Resultado de ``analyze_stock``."""
+    measured: int = 0
+    skipped: int = 0          # ya tenían medida (``missing_only``) o sin audio en disco
+    failed: list[str] = field(default_factory=list)
+
+    def to_text(self) -> str:
+        lines = [f"Medidos: {self.measured}", f"Omitidos: {self.skipped}",
+                 f"Fallidos: {len(self.failed)}"]
+        lines += [f"  - {f}" for f in self.failed]
+        return "\n".join(lines)
+
+
+def analyze_stock(
+    db: DB,
+    analyzer: AudioAnalyzer,
+    *,
+    kind: str = "music",
+    missing_only: bool = True,
+) -> AnalyzeReport:
+    """
+    Mide (sin modificar) el audio de los segmentos ``ready`` de ``kind`` y guarda
+    ``meta.loudness_lufs`` / ``meta.true_peak_db``. Sirve para el stock descargado
+    antes de que existiera la medida. Con ``missing_only`` solo los que no la tienen.
+    """
+    report = AnalyzeReport()
+    for seg in db.list_segments(kind=kind, status="ready"):
+        if missing_only and isinstance(seg.meta.get("loudness_lufs"), int | float):
+            report.skipped += 1
+            continue
+        if not seg.path.is_file():
+            report.skipped += 1
+            continue
+        try:
+            measured = analyzer.analyze(seg.path)
+        except (PostError, OSError, subprocess.SubprocessError) as exc:
+            report.failed.append(f"{seg.id} ({seg.title}): {exc}")
+            continue
+        if measured is None:
+            report.failed.append(f"{seg.id} ({seg.title}): sin analizador (¿ffmpeg?)")
+            continue
+        meta = dict(seg.meta)
+        meta["loudness_lufs"] = round(measured.integrated_lufs, 2)
+        meta["true_peak_db"] = (
+            None if measured.true_peak_db is None else round(measured.true_peak_db, 2)
+        )
+        db.update_segment_meta(seg.id, meta)
+        report.measured += 1
+    return report

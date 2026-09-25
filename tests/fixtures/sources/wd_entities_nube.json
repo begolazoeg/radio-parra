@@ -1,0 +1,27 @@
+{
+  "_comment": "Respuesta sintética con la forma real de la API; 'Nube Ferrán' es una artista ficticia y ningún id ni texto corresponde a nada real.",
+  "entities": {
+    "Q999000111": {
+      "type": "item",
+      "id": "Q999000111",
+      "sitelinks": {
+        "eswiki": {
+          "site": "eswiki",
+          "title": "Nube Ferrán",
+          "badges": []
+        },
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Nube Ferrán (singer)",
+          "badges": []
+        },
+        "commonswiki": {
+          "site": "commonswiki",
+          "title": "Category:Nube Ferrán",
+          "badges": []
+        }
+      }
+    }
+  },
+  "success": 1
+}

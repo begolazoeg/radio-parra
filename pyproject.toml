@@ -19,6 +19,7 @@ dependencies = [
     "uvicorn>=0.30",
     "python-ulid>=2",
     "pyyaml>=6",
+    "anthropic>=1.8.0",
 ]
 
 [project.scripts]
@@ -40,6 +41,9 @@ packages = ["src/radio"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "real_provider: usa un proveedor real (red, claves, Piper instalado); solo con RADIO_REAL_PROVIDERS=1, nunca en CI",
+]
 
 [tool.ruff]
 src = ["src"]

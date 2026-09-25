@@ -9,9 +9,20 @@ Se lanza como ``[sys.executable, fake_mpv.py, --idle=yes, ..., --input-ipc-serve
 - Un archivo inexistente produce ``end-file`` con ``reason: error``.
 - Un archivo cuyo nombre contiene ``crash`` mata el proceso (``os._exit``) justo
   después de emitir ``start-file``: sirve para probar el watchdog.
-- Comandos: ``loadfile <f> [append-play|append|replace]``, ``playlist-next [weak|force]``,
+- Comandos: ``loadfile <f> [append-play|append|replace] [...]``, ``playlist-next [weak|force]``,
   ``playlist-remove <i>``, ``playlist-clear``, ``stop``, ``quit``, ``get_property <playlist|idle-active|
-  playlist-pos|path>``, ``observe_property <id> idle-active``.
+  playlist-pos|path|mpv-version|af>``, ``observe_property <id> idle-active``.
+- Versión: ``FAKE_MPV_VERSION`` (por defecto ``mpv 0.35.1``, como Raspberry Pi OS);
+  ``none`` hace que ``get_property mpv-version`` falle. Según la versión, ``loadfile``
+  acepta la forma antigua ``<f> <flags> <options>`` (< 0.38) o la nueva
+  ``<f> <flags> <index> <options>`` (≥ 0.38); la otra forma se rechaza con
+  ``invalid parameter``, como haría mpv.
+- Opciones por archivo (``af=...``): valen solo mientras suena ese archivo; al acabar
+  se vuelve al ``--af`` global de la línea de comandos. ``get_property af`` da el
+  filtro en vigor.
+- Si existe ``FAKE_MPV_LOG``, añade ahí una línea JSON por ``loadfile``
+  (``{"loadfile": [...], "options": {...}}``) y por archivo que empieza
+  (``{"start": <f>, "af": <filtro en vigor>}``).
 - Eventos: ``start-file``, ``file-loaded``, ``end-file`` (eof/stop/quit/error), ``idle``
   y ``property-change`` de ``idle-active``.
 - Si existe la variable ``FAKE_MPV_ARGV_LOG``, añade ahí una línea JSON con su argv.
@@ -21,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import sys
 import threading
@@ -43,17 +55,74 @@ def duration_of(path: Path) -> float:
         return DEFAULT_DURATION
 
 
+LOADFILE_INDEX_VERSION = (0, 38)
+
+
+def log_line(record: dict[str, Any]) -> None:
+    path = os.environ.get("FAKE_MPV_LOG")
+    if path:
+        with open(path, "a") as fh:
+            fh.write(json.dumps(record) + "\n")
+
+
+def version_tuple(version: str | None) -> tuple[int, int] | None:
+    match = re.search(r"(\d+)\.(\d+)", version or "")
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def split_top(text: str, sep: str) -> list[str]:
+    """Parte por ``sep`` fuera de corchetes."""
+    parts, depth, cur = [], 0, ""
+    for ch in text:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        if ch == sep and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return parts
+
+
+def parse_options(raw: Any) -> dict[str, str] | None:
+    """``"af=[x=1],volume=50"`` → ``{"af": "x=1", "volume": "50"}``; None si no se entiende."""
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items()}
+    if not isinstance(raw, str):
+        return None
+    options: dict[str, str] = {}
+    for part in split_top(raw, ","):
+        if not part:
+            continue
+        if "=" not in part:
+            return None
+        key, value = part.split("=", 1)
+        if value.startswith("[") and value.endswith("]"):
+            value = value[1:-1]
+        elif "=" in value:
+            return None            # mpv corta el valor en el "=": hay que ir entre corchetes
+        options[key] = value
+    return options
+
+
 class Entry:
     _ids = 0
 
-    def __init__(self, filename: str) -> None:
+    def __init__(self, filename: str, options: dict[str, str] | None = None) -> None:
         Entry._ids += 1
         self.id = Entry._ids
         self.filename = filename
+        self.options = options or {}
 
 
 class FakeMpv:
-    def __init__(self) -> None:
+    def __init__(self, version: str | None = "mpv 0.35.1", global_af: str = "") -> None:
+        self.version = version
+        self.global_af = global_af
+        self.af = global_af          # filtro en vigor (opciones por archivo incluidas)
         self.cond = threading.Condition()
         self.playlist: list[Entry] = []
         self.playing: Entry | None = None
@@ -104,6 +173,8 @@ class FakeMpv:
                 self.playing = entry
                 self.end_reason = None
                 self.stop_evt.clear()
+                self.af = entry.options.get("af", self.global_af)
+            log_line({"start": entry.filename, "af": self.af})
             self.send({"event": "start-file", "playlist_entry_id": entry.id})
             path = Path(entry.filename)
             if "crash" in path.name:
@@ -125,6 +196,7 @@ class FakeMpv:
             self.send(msg)
             with self.cond:
                 self.playing = None
+                self.af = self.global_af     # las opciones por archivo se restauran
                 if self.quitting:
                     return
                 nxt = None
@@ -150,7 +222,11 @@ class FakeMpv:
         name = cmd[0] if cmd else ""
         with self.cond:
             if name == "loadfile":
-                entry = Entry(str(cmd[1]))
+                options = self._loadfile_options(cmd)
+                if options is None:
+                    return "invalid parameter", None
+                entry = Entry(str(cmd[1]), options)
+                log_line({"loadfile": cmd, "options": options})
                 mode = cmd[2] if len(cmd) > 2 else "replace"
                 if mode == "replace":
                     self.playlist = [entry]
@@ -194,11 +270,29 @@ class FakeMpv:
                 self.cond.notify_all()
                 return "success", None
             if name == "get_property":
+                if cmd[1] == "mpv-version":
+                    if self.version is None:
+                        return "property unavailable", None
+                    return "success", self.version
                 return "success", self._property_locked(str(cmd[1]))
             if name == "observe_property":
                 self.observed[str(cmd[2])] = int(cmd[1])
                 return "success", None
         return "invalid parameter", None
+
+    def _loadfile_options(self, cmd: list[Any]) -> dict[str, str] | None:
+        """Opciones por archivo según la forma de ``loadfile`` de esta versión (None = error)."""
+        extra = cmd[3:]
+        if not extra:
+            return {}
+        new_form = (version_tuple(self.version) or (0, 0)) >= LOADFILE_INDEX_VERSION
+        if new_form:
+            if len(extra) > 2 or isinstance(extra[0], str) and not extra[0].lstrip("-").isdigit():
+                return None
+            return parse_options(extra[1]) if len(extra) == 2 else {}
+        if len(extra) > 1:
+            return None               # mpv antiguo: demasiados argumentos
+        return parse_options(extra[0])
 
     def _property_locked(self, prop: str) -> Any:
         if prop == "playlist":
@@ -212,6 +306,8 @@ class FakeMpv:
             return self.playlist.index(self.playing) if self.playing in self.playlist else -1
         if prop == "path":
             return self.playing.filename if self.playing else None
+        if prop == "af":
+            return self.af
         return None
 
     def client_loop(self, conn: socket.socket) -> None:
@@ -250,7 +346,9 @@ def main(argv: list[str]) -> int:
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(sock_path)
     server.listen(4)
-    mpv = FakeMpv()
+    version = os.environ.get("FAKE_MPV_VERSION", "mpv 0.35.1")
+    global_af = next((a.split("=", 1)[1] for a in argv if a.startswith("--af=")), "")
+    mpv = FakeMpv(None if version == "none" else version, global_af)
     threading.Thread(target=mpv.player_loop, daemon=True).start()
     while True:
         conn, _ = server.accept()

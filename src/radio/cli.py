@@ -8,8 +8,12 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
+
+if TYPE_CHECKING:
+    from radio.core.config import RadioConfig
 
 app = typer.Typer(help="Radio Parra — radio casera con locutor IA")
 
@@ -140,6 +144,9 @@ def doctor(
            msg=f"sin implementar: {', '.join(unknown)}" if unknown
            else "ninguno: no entrará stock nuevo")
 
+    # Proveedores LLM/TTS (solo los usan los productores; sin red)
+    _doctor_providers(config)
+
     # Feed de música (decisión #8)
     tinydesk = config.producers.get("music_tinydesk")
     feed_url = (tinydesk.params.get("feed_url") if tinydesk else None) or ""
@@ -161,6 +168,59 @@ def doctor(
         except httpx.HTTPError as exc:
             _check("feed accesible", False, warn=True,
                    msg=f"{exc} (sin red la emisora sigue sonando desde el stock)")
+
+
+def _doctor_providers(config: RadioConfig) -> None:
+    """
+    Comprobaciones de ``radio doctor`` para los proveedores (§4.1), sin red: solo
+    miran si las credenciales, el binario y los modelos de voz están presentes.
+    """
+    from radio.providers.llm.claude import detect_credentials  # noqa: PLC0415
+    from radio.providers.registry import LLM_PROVIDERS, TTS_PROVIDERS  # noqa: PLC0415
+    from radio.providers.tts.piper import (  # noqa: PLC0415
+        DEFAULT_MODELS_DIR,
+        PIPER_VOICE_PROVIDERS,
+        find_binary,
+        resolve_model,
+    )
+
+    providers = config.station.providers
+    llm = providers.get("llm")
+    llm_name = LLM_PROVIDERS.get(llm.name.lower()) if llm else None
+    if llm is None or llm_name is None:
+        _check("LLM", False, warn=True,
+               msg=f"proveedor desconocido: {llm.name}" if llm else "sin configurar")
+    elif llm_name == "claude":
+        source = detect_credentials()
+        _check(f"LLM claude ({llm.model or 'claude-sonnet-5'}) credenciales", source is not None,
+               warn=True, info=f"{source} presente (sin comprobar en red)",
+               msg="falta ANTHROPIC_API_KEY (o `ant auth login`): no habrá locutor")
+    else:
+        _check(f"LLM {llm_name}", True, info="sin red")
+
+    tts = providers.get("tts")
+    tts_name = TTS_PROVIDERS.get(tts.name.lower()) if tts else None
+    if tts is None or tts_name is None:
+        _check("TTS", False, warn=True,
+               msg=f"proveedor desconocido: {tts.name}" if tts else "sin configurar")
+    elif tts_name == "piper":
+        binary = str(tts.extra.get("binary", "piper"))
+        _check(f"TTS piper ({binary})", find_binary(binary) is not None, warn=True,
+               msg="no está instalado: no habrá voz (ver voices.yaml)")
+        models_dir = Path(tts.extra.get("models_dir", DEFAULT_MODELS_DIR))
+        for entry in config.voices.voices:
+            if entry.provider not in PIPER_VOICE_PROVIDERS:
+                continue
+            model = resolve_model(entry.provider_voice_id, models_dir)
+            ok = model.is_file() and model.with_name(model.name + ".json").is_file()
+            _check(f"voz {entry.id} ({model})", ok, warn=True,
+                   msg="falta el modelo .onnx o su .onnx.json (instálalo a mano, revisa la licencia)")
+    elif tts_name == "cloud":
+        env = str(tts.extra.get("api_key_env", "ELEVENLABS_API_KEY"))
+        _check(f"TTS cloud ({env})", bool(os.environ.get(env, "").strip()), warn=True,
+               info="presente (sin comprobar en red)", msg="falta la clave en el entorno / .env")
+    else:
+        _check(f"TTS {tts_name}", True, info="sin red")
 
 
 @app.command()
@@ -280,6 +340,145 @@ def produce(
             prompts_dir=prompts_dir, post=NullPost() if dry_run else None,
         )
         report = run_produce(ctx, None if all_ else [name or ""], dry_run=dry_run)
+    typer.echo(report.to_text())
+    if not report.ok:
+        raise typer.Exit(1)
+
+
+@app.command("analyze-loudness")
+def analyze_loudness(
+    kind: str = typer.Option("music", "--kind", help="Kind de los segmentos a medir"),
+    missing_only: bool = typer.Option(
+        False, "--missing-only", help="Solo los que aún no tienen meta.loudness_lufs"
+    ),
+    config_dir: Path = typer.Option(  # noqa: B008
+        Path("config"), "--config-dir", help="Directorio de configuración"
+    ),
+    data_dir: Path | None = typer.Option(  # noqa: B008
+        None, "--data-dir", help="Directorio de datos (por defecto station.yaml → data_dir)"
+    ),
+) -> None:
+    """
+    Mide con ffmpeg (sin modificar ni recodificar) el loudness del stock `ready` y lo
+    guarda en meta, para la normalización en reproducción. Sale con 1 si algo falla.
+    """
+    from radio.core.config import RadioConfig  # noqa: PLC0415
+    from radio.core.paths import db_path  # noqa: PLC0415
+    from radio.core.store import DB  # noqa: PLC0415
+    from radio.producers.post import NullAnalyzer, analyze_stock, choose_analyzer  # noqa: PLC0415
+
+    config = RadioConfig.load(config_dir)
+    path = db_path(data_dir or Path(config.station.data_dir))
+    if not path.exists():
+        typer.echo(f"No existe la BD {path}: todavía no hay stock.")
+        return
+    analyzer = choose_analyzer()
+    if isinstance(analyzer, NullAnalyzer):
+        typer.echo("ffmpeg no está instalado: no se puede medir el loudness.", err=True)
+        raise typer.Exit(1)
+    with DB(path) as db:
+        report = analyze_stock(db, analyzer, kind=kind, missing_only=missing_only)
+    typer.echo(report.to_text())
+    if report.failed:
+        raise typer.Exit(1)
+
+
+@app.command()
+def preview(
+    producer: str = typer.Argument(..., help="Productor a previsualizar (hoy: host_intro)"),
+    fake: bool = typer.Option(
+        False, "--fake", help="LLM, TTS y fuentes simulados: sin red, sin claves, sin BD"
+    ),
+    music_id: str | None = typer.Option(
+        None, "--music-id", help="Canción para la intro (por defecto, la siguiente candidata)"
+    ),
+    no_play: bool = typer.Option(False, "--no-play", help="No reproduce el audio con mpv"),
+    out: Path | None = typer.Option(  # noqa: B008
+        None, "--out", help="Guarda el audio generado en esta ruta"
+    ),
+    register: bool = typer.Option(
+        False, "--register", help="Registra la intro en la BD (por defecto no se registra)"
+    ),
+    config_dir: Path = typer.Option(  # noqa: B008
+        Path("config"), "--config-dir", help="Directorio de configuración"
+    ),
+    data_dir: Path | None = typer.Option(  # noqa: B008
+        None, "--data-dir", help="Directorio de datos (por defecto station.yaml → data_dir)"
+    ),
+    prompts_dir: Path = typer.Option(  # noqa: B008
+        Path("prompts"), "--prompts-dir", help="Directorio de plantillas de prompts"
+    ),
+) -> None:
+    """
+    Genera UN segmento y lo reproduce en local (§9), para iterar prompts y voces.
+
+    Sin --fake usa los proveedores de station.yaml (Claude + Piper) y las fuentes
+    abiertas reales, sobre la música de data/state.db; no registra nada salvo
+    --register. Con --fake no hay red, claves ni BD.
+    """
+    from radio.core.config import RadioConfig  # noqa: PLC0415
+    from radio.preview import (  # noqa: PLC0415
+        PREVIEWABLE,
+        PreviewError,
+        preview_fake,
+        preview_real,
+    )
+
+    if producer not in PREVIEWABLE:
+        typer.echo(f"Sin previsualización para {producer!r} (disponibles: "
+                   f"{', '.join(PREVIEWABLE)})", err=True)
+        raise typer.Exit(2)
+    if fake and (register or music_id):
+        typer.echo("--fake no usa la BD: no admite --register ni --music-id", err=True)
+        raise typer.Exit(2)
+    config = RadioConfig.load(config_dir)
+    try:
+        if fake:
+            code = preview_fake(config, prompts_dir=prompts_dir, play=not no_play, out=out,
+                                echo=typer.echo)
+        else:
+            code = preview_real(
+                config, data_dir=data_dir or Path(config.station.data_dir),
+                prompts_dir=prompts_dir, music_id=music_id, play=not no_play, out=out,
+                register=register, echo=typer.echo,
+            )
+    except PreviewError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if code:
+        raise typer.Exit(code)
+
+
+@app.command()
+def audit(
+    kind: str = typer.Argument(..., help="Kind a auditar (hoy: host_intro)"),
+    config_dir: Path = typer.Option(  # noqa: B008
+        Path("config"), "--config-dir", help="Directorio de configuración"
+    ),
+    db_file: Path | None = typer.Option(  # noqa: B008
+        None, "--db", help="Ruta de la BD (por defecto <data_dir>/state.db)"
+    ),
+) -> None:
+    """
+    Comprueba que el 100 % de las intros 'ready' con datos tienen claims trazables
+    (cada claim cita una fuente guardada y el grounding vuelve a pasar). Sale con
+    código 1 si hay incumplimientos.
+    """
+    from radio.core.config import RadioConfig  # noqa: PLC0415
+    from radio.core.paths import db_path  # noqa: PLC0415
+    from radio.core.store import DB  # noqa: PLC0415
+    from radio.producers.host_intro import audit_host_intros  # noqa: PLC0415
+
+    if kind != "host_intro":
+        typer.echo(f"Sin auditoría para {kind!r} (disponible: host_intro)", err=True)
+        raise typer.Exit(2)
+    config = RadioConfig.load(config_dir)
+    path = db_file or db_path(Path(config.station.data_dir))
+    if not path.exists():
+        typer.echo(f"No existe la BD {path}: nada que auditar.")
+        return
+    with DB(path) as db:
+        report = audit_host_intros(db, config.station.name, kind=kind)
     typer.echo(report.to_text())
     if not report.ok:
         raise typer.Exit(1)

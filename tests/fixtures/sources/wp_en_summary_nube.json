@@ -1,0 +1,29 @@
+{
+  "_comment": "Respuesta sintética con la forma real de la API; 'Nube Ferrán' es una artista ficticia y ningún id ni texto corresponde a nada real.",
+  "type": "standard",
+  "title": "Nube Ferrán (singer)",
+  "displaytitle": "Nube Ferrán (singer)",
+  "namespace": {
+    "id": 0,
+    "text": ""
+  },
+  "wikibase_item": "Q999000111",
+  "titles": {
+    "canonical": "Nube_Ferrán_(singer)",
+    "normalized": "Nube Ferrán (singer)",
+    "display": "Nube Ferrán (singer)"
+  },
+  "pageid": 99900012,
+  "lang": "en",
+  "dir": "ltr",
+  "content_urls": {
+    "desktop": {
+      "page": "https://en.wikipedia.org/wiki/Nube_Ferr%C3%A1n_(singer)"
+    },
+    "mobile": {
+      "page": "https://en.m.wikipedia.org/wiki/Nube_Ferr%C3%A1n_(singer)"
+    }
+  },
+  "extract": "Nube Ferrán (born May 17, 1991) is a fictional American singer-songwriter from Villa Parral. She has released three studio albums.",
+  "extract_html": "<p><b>Nube Ferrán</b> is a fictional singer-songwriter.</p>"
+}

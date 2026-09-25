@@ -18,23 +18,31 @@ Pipeline (sobre ``StagedProducer``):
   código HTTP, tipo de contenido, tamaño y duración (mutagen, > 0). Un episodio
   defectuoso (4xx, no audio, vacío…) se descarta y se recuerda para no reintentarlo;
   un error de red o 5xx hace fallar la ejecución (se reintenta en el siguiente timer).
-- ``post``: por defecto no se toca (recodificar 20-30 min de audio en una Pi es caro
-  y con pérdidas); ``params.loudnorm: true`` activa ``ctx.post``.
+- ``post``: el audio **no se modifica ni se recodifica** (términos de NPR, ADR 0002:
+  ``loudnorm: false``). Solo se **analiza** (``analyze``): una pasada de lectura de
+  ffmpeg mide el loudness integrado y el pico verdadero, que se guardan en ``meta``
+  (``loudness_lufs``, ``true_peak_db``; ``None`` si no se puede medir, con aviso). La
+  emisora iguala el volumen al reproducir con una ganancia por archivo
+  (``radio.station.gain``), sin tocar el archivo.
 - ``register``: ``data/stock/music/<id>.<ext>`` + fila con ``meta``: title, guid,
-  published, link, description (texto plano, para el grounding de ``host_intro``),
-  artist y tags (``source:tiny_desk`` y ``artist:<slug>`` si se deduce del título).
+  published, link, artist, tags (``source:tiny_desk`` y ``artist:<slug>`` si se
+  deduce del título) y la medida de loudness. **No se guarda la descripción del
+  episodio**: la dueña decidió que las descripciones de NPR nunca se usen como fuente
+  de un LLM (términos de NPR: no usar el contenido para sistemas de IA).
 - ``finish``: tope de caché (``max_cache_items`` y/o ``max_cache_mb``) por LRU.
 
 Si la red falla, el stock no se toca y la radio sigue sonando (invariante 2).
 
 Parámetros (``params``): ``feed_url`` (obligatorio), ``max_cache_items`` (60),
 ``max_cache_mb`` (sin límite), ``max_per_run`` (5), ``rotate_per_run`` (1),
-``max_download_mb`` (400), ``download_delay_s`` (1.0), ``loudnorm`` (false).
+``max_download_mb`` (400), ``download_delay_s`` (1.0), ``loudnorm`` (false: no activar
+con Tiny Desk), ``analyze_loudness`` (true).
 """
 
 from __future__ import annotations
 
 import logging
+import subprocess
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -64,7 +72,12 @@ from radio.producers.base import (
     ProducerError,
     StagedProducer,
 )
-from radio.producers.post import audio_duration
+from radio.producers.post import (
+    AudioAnalyzer,
+    PostError,
+    audio_duration,
+    choose_analyzer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +98,7 @@ DEFAULTS: dict[str, Any] = {
     "max_download_mb": 400,
     "download_delay_s": 1.0,
     "loudnorm": False,
+    "analyze_loudness": True,
 }
 
 
@@ -102,9 +116,12 @@ class MusicTinyDeskProducer(StagedProducer):
         *,
         client: httpx.Client | None = None,
         sleep: Callable[[float], object] = time.sleep,
+        analyzer: AudioAnalyzer | None = None,
     ) -> None:
         super().__init__(config)
         self._external_client = client
+        # Sin inyectar: ffmpeg si está instalado (se decide en la primera medida)
+        self._analyzer = analyzer
         self._client: httpx.Client | None = None
         self._sleep = sleep
         self._cache: FeedCache | None = None
@@ -192,7 +209,6 @@ class MusicTinyDeskProducer(StagedProducer):
             "guid": entry.guid,
             "published": entry.published.isoformat() if entry.published else None,
             "link": entry.link,
-            "description": entry.description,
             "artist": artist,
             "tags": tags,
             "source": "rss",
@@ -244,9 +260,42 @@ class MusicTinyDeskProducer(StagedProducer):
         return draft
 
     def post(self, ctx: ProducerContext, draft: Draft) -> Draft:
-        if not self.param("loudnorm"):
+        """Sin recodificar (salvo ``loudnorm: true``); después, ``analyze``."""
+        if self.param("loudnorm"):
+            draft = super().post(ctx, draft)
+        return self.analyze(ctx, draft)
+
+    @property
+    def analyzer(self) -> AudioAnalyzer:
+        if self._analyzer is None:
+            self._analyzer = choose_analyzer()
+        return self._analyzer
+
+    def analyze(self, ctx: ProducerContext, draft: Draft) -> Draft:
+        """
+        Mide loudness integrado y pico verdadero **sin modificar el archivo** y los
+        guarda en ``meta`` (``loudness_lufs``, ``true_peak_db``). Si no se puede medir
+        (sin ffmpeg, error o audio casi mudo), ambos quedan ``None`` con un aviso: el
+        episodio se registra igual y sonará sin ganancia (0 dB).
+        """
+        draft.meta["loudness_lufs"] = None
+        draft.meta["true_peak_db"] = None
+        if draft.audio is None or not self.param("analyze_loudness"):
             return draft
-        return super().post(ctx, draft)
+        try:
+            measured = self.analyzer.analyze(draft.audio.path)
+        except (PostError, OSError, subprocess.SubprocessError) as exc:
+            logger.warning("%s: no se pudo medir el loudness de %s: %s",
+                           self.name, draft.meta.get("title"), exc)
+            return draft
+        if measured is None:
+            logger.warning("%s: loudness sin medir para %s (sin analizador)",
+                           self.name, draft.meta.get("title"))
+            return draft
+        draft.meta["loudness_lufs"] = round(measured.integrated_lufs, 2)
+        if measured.true_peak_db is not None:
+            draft.meta["true_peak_db"] = round(measured.true_peak_db, 2)
+        return draft
 
     def on_rejected(self, ctx: ProducerContext, draft: Draft, reason: str) -> None:
         """Recuerda el episodio defectuoso para no volver a descargarlo."""
