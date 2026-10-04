@@ -71,7 +71,8 @@ def test_doctor_reports_legacy_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     conn.close()
     result = CliRunner().invoke(app, ["doctor", "--config-dir", str(REPO / "config")])
     assert result.exit_code == 0, result.output
-    assert "data/state.db" in result.output and "bórrala" in result.output
+    # El separador de ruta lo pone el SO (data/state.db en POSIX, data\state.db en Windows).
+    assert "state.db" in result.output and "bórrala" in result.output
 
 
 def test_doctor_reports_schema_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

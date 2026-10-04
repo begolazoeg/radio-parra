@@ -19,6 +19,7 @@ Criterios de aceptación de la Fase 2 (§12 de ARCHITECTURE.md), sin red ni clav
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import sys
@@ -217,14 +218,21 @@ def test_c_preview_rejects_unknown_producer_and_fake_register() -> None:
 
 
 def _install_fake_mpv(tmp_path: Path) -> tuple[Path, Path]:
+    # En Windows no hay shebang: ``subprocess.run`` sin shell=True sí sabe
+    # ejecutar un .bat directamente (a diferencia de un .py suelto).
     log = tmp_path / "mpv-args.json"
-    exe = tmp_path / "bin" / "mpv"
-    exe.parent.mkdir(parents=True, exist_ok=True)
-    exe.write_text(
-        f"#!{sys.executable}\nimport json, sys\n"
-        f"json.dump(sys.argv[1:], open({str(log)!r}, 'w'))\n", encoding="utf-8",
-    )
-    exe.chmod(0o755)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    body = f"import json, sys\njson.dump(sys.argv[1:], open({str(log)!r}, 'w'))\n"
+    if os.name == "nt":
+        script = bin_dir / "fake_mpv.py"
+        script.write_text(body, encoding="utf-8")
+        exe = bin_dir / "mpv.bat"
+        exe.write_text(f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+    else:
+        exe = bin_dir / "mpv"
+        exe.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
+        exe.chmod(0o755)
     return exe, log
 
 

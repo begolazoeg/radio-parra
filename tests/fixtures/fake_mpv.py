@@ -36,11 +36,134 @@ import re
 import socket
 import sys
 import threading
+import time
 import wave
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 DEFAULT_DURATION = 0.2
+
+if sys.platform == "win32":
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.CreateNamedPipeW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+        wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+    ]
+    _kernel32.CreateNamedPipeW.restype = wintypes.HANDLE
+    _kernel32.ConnectNamedPipe.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+    _kernel32.ConnectNamedPipe.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+    _kernel32.PeekNamedPipe.argtypes = [
+        wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _kernel32.PeekNamedPipe.restype = wintypes.BOOL
+
+    def _peek_named_pipe(handle: int, nbytes: int) -> bytes | None:
+        """Hasta ``nbytes`` del *pipe* sin consumirlos; ``None`` si está roto/cerrado."""
+        buf = ctypes.create_string_buffer(nbytes)
+        bytes_read = wintypes.DWORD(0)
+        ok = _kernel32.PeekNamedPipe(handle, buf, nbytes, ctypes.byref(bytes_read), None, None)
+        return buf.raw[: bytes_read.value] if ok else None
+
+
+class _WinPipeLineReader:
+    """
+    Líneas de un *pipe* de Windows sondeando con ``PeekNamedPipe`` en vez de
+    bloquear en ``read()``. ``client_loop`` necesita leer del cliente a la vez
+    que ``FakeMpv.player_loop`` (otro hilo) escribe eventos en el mismo *pipe*:
+    una lectura bloqueante clásica sobre el archivo deja el *handle* "ocupado"
+    el tiempo que tarde en llegar algo del cliente, y entonces la escritura
+    concurrente del otro hilo se queda colgada (comprobado a mano). Sondear sin
+    bloquear nunca retiene el *handle*, así que no hay colisión posible.
+    """
+
+    _PEEK_BYTES = 65536
+    _POLL_S = 0.01
+
+    def __init__(self, handle: int, fh: BinaryIO) -> None:
+        self._handle = handle
+        self._fh = fh
+
+    def __enter__(self) -> _WinPipeLineReader:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass  # el pipe lo cierra _WinPipeConn.close(), no este envoltorio
+
+    def __iter__(self) -> _WinPipeLineReader:
+        return self
+
+    def __next__(self) -> bytes:
+        while True:
+            peeked = _peek_named_pipe(self._handle, self._PEEK_BYTES)
+            if peeked is None:
+                raise StopIteration  # pipe roto: como agotar sock.makefile("rb")
+            idx = peeked.find(b"\n")
+            if idx >= 0:
+                try:
+                    return self._fh.read(idx + 1)  # ya confirmado: no bloquea
+                except OSError:
+                    raise StopIteration from None
+            time.sleep(self._POLL_S)
+
+
+class _WinPipeConn:
+    """
+    Adapta un *named pipe* de Windows a lo que ``FakeMpv.client_loop``/``send``
+    esperan de un socket (``sendall``, ``makefile``). Ver ``_WinPipeLineReader``
+    sobre por qué ``makefile`` no puede ser una lectura bloqueante normal.
+    """
+
+    def __init__(self, handle: int, fh: BinaryIO) -> None:
+        self._handle = handle
+        self._fh = fh
+
+    def sendall(self, data: bytes) -> None:
+        self._fh.write(data)
+
+    def makefile(self, mode: str) -> _WinPipeLineReader:
+        return _WinPipeLineReader(self._handle, self._fh)
+
+    def close(self) -> None:
+        self._fh.close()
+
+
+def _win_accept_loop(sock_path: str, handler: Any) -> None:
+    """
+    Bucle de aceptación de un *named pipe* en Windows, equivalente a
+    ``socket.listen()`` + ``accept()`` en bucle. CPython en Windows no define
+    ``socket.AF_UNIX`` (aunque el sistema lo soporte); crear el extremo servidor
+    de un *named pipe* tampoco lo cubre ningún módulo de la librería estándar
+    salvo ``ctypes`` (no hace falta ``pywin32``): ``CreateNamedPipeW`` +
+    ``ConnectNamedPipe`` para aceptar, y ``msvcrt.open_osfhandle`` para volver
+    a un archivo normal de Python en cuanto hay un cliente conectado.
+    """
+    PIPE_ACCESS_DUPLEX = 0x3
+    PIPE_TYPE_BYTE_WAIT = 0x0  # PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT
+    PIPE_UNLIMITED_INSTANCES = 255
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    name = f"\\\\.\\pipe\\{sock_path}"
+
+    while True:
+        handle = _kernel32.CreateNamedPipeW(
+            name, PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE_WAIT,
+            PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, None,
+        )
+        if handle in (0, INVALID_HANDLE_VALUE):
+            raise OSError(f"CreateNamedPipeW falló (código {ctypes.get_last_error()})")
+        if not _kernel32.ConnectNamedPipe(handle, None):
+            _kernel32.CloseHandle(handle)
+            continue
+        fd = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
+        conn = _WinPipeConn(handle, os.fdopen(fd, "r+b", buffering=0))
+        threading.Thread(target=handler, args=(conn,), daemon=True).start()
 
 
 def duration_of(path: Path) -> float:
@@ -131,7 +254,7 @@ class FakeMpv:
         self.end_reason: str | None = None
         self.quitting = False
         self.observed: dict[str, int] = {}
-        self.clients: list[socket.socket] = []
+        self.clients: list[Any] = []  # socket.socket (POSIX) o _WinPipeConn (Windows)
         self.send_lock = threading.Lock()
 
     # ── Salida ───────────────────────────────────────────────────────────────
@@ -310,7 +433,7 @@ class FakeMpv:
             return self.af
         return None
 
-    def client_loop(self, conn: socket.socket) -> None:
+    def client_loop(self, conn: Any) -> None:
         with self.send_lock:
             self.clients.append(conn)
         with conn.makefile("rb") as stream:
@@ -341,15 +464,18 @@ def main(argv: list[str]) -> int:
     if sock_path is None:
         print("fake_mpv: falta --input-ipc-server", file=sys.stderr)
         return 2
+    version = os.environ.get("FAKE_MPV_VERSION", "mpv 0.35.1")
+    global_af = next((a.split("=", 1)[1] for a in argv if a.startswith("--af=")), "")
+    mpv = FakeMpv(None if version == "none" else version, global_af)
+    threading.Thread(target=mpv.player_loop, daemon=True).start()
+    if sys.platform == "win32":
+        _win_accept_loop(sock_path, mpv.client_loop)
+        return 0
     if os.path.exists(sock_path):
         os.unlink(sock_path)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(sock_path)
     server.listen(4)
-    version = os.environ.get("FAKE_MPV_VERSION", "mpv 0.35.1")
-    global_af = next((a.split("=", 1)[1] for a in argv if a.startswith("--af=")), "")
-    mpv = FakeMpv(None if version == "none" else version, global_af)
-    threading.Thread(target=mpv.player_loop, daemon=True).start()
     while True:
         conn, _ = server.accept()
         threading.Thread(target=mpv.client_loop, args=(conn,), daemon=True).start()

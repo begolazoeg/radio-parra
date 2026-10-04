@@ -6,6 +6,7 @@ voz vacíos, voces de prueba y un transporte HTTP simulado para ElevenLabs.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -18,12 +19,25 @@ FAKE_PIPER = Path(__file__).with_name("fake_piper.py")
 
 
 def install_fake_piper(tmp_path: Path) -> Path:
-    """Ejecutable ``piper`` falso (script con el Python actual en el shebang)."""
-    exe = tmp_path / "bin" / "piper"
-    exe.parent.mkdir(parents=True, exist_ok=True)
-    exe.write_text(f"#!{sys.executable}\n" + FAKE_PIPER.read_text(encoding="utf-8"),
-                   encoding="utf-8")
-    exe.chmod(0o755)
+    """
+    Ejecutable ``piper`` falso. En POSIX, un script con el Python actual en el
+    shebang. En Windows no hay shebang ni permisos +x: ``subprocess.run`` sin
+    ``shell=True`` (como hace ``PiperTTS``) sí sabe ejecutar un ``.bat``
+    directamente, así que ahí se instala un lanzador ``.bat`` que llama al
+    mismo script con el Python actual.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        script = bin_dir / "fake_piper.py"
+        script.write_text(FAKE_PIPER.read_text(encoding="utf-8"), encoding="utf-8")
+        exe = bin_dir / "piper.bat"
+        exe.write_text(f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+    else:
+        exe = bin_dir / "piper"
+        exe.write_text(f"#!{sys.executable}\n" + FAKE_PIPER.read_text(encoding="utf-8"),
+                        encoding="utf-8")
+        exe.chmod(0o755)
     return exe
 
 
