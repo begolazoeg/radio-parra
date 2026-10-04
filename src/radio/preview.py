@@ -74,7 +74,7 @@ def format_result(result: PreviewResult) -> str:
         f"Canción: {result.music.title} ({result.music.id})",
         f"Artista: {meta.get('artist') or '(desconocido)'}",
         f"Resultado: {g.get('outcome', '?')} — estado {result.draft.status}"
-        + (" (con datos)" if g.get("has_facts") else " (sin datos)"),
+        + (" (con datos)" if meta.get("claims") else " (sin datos)"),
         "",
         "Guion:",
         f"  {result.draft.script}",

@@ -653,7 +653,7 @@ class HostIntroProducer(StagedProducer):
             "attempts": [a.to_meta() for a in attempts],
         })
         who = draft.meta.get("artist") or draft.meta.get("music_title") or "concierto"
-        label = {"grounded": "con datos" if draft.meta["grounding"]["has_facts"] else "sin datos",
+        label = {"grounded": "con datos" if att.claims else "sin datos",
                  "fact_free": "sin datos", "quarantined": "en cuarentena"}[outcome]
         draft.summary = f"Intro de {who} ({label})"
 
