@@ -107,7 +107,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Literal, Protocol
+from typing import Any, BinaryIO, Literal, Protocol
 
 from radio.core.clock import Clock, SystemClock
 from radio.providers.audio.events import (
@@ -217,103 +217,104 @@ if sys.platform == "win32":
             return None
         return buf.raw[: bytes_read.value] if buf else b""
 
+    class _WinPipeSocket:
+        """
+        Sustituto de ``socket.socket`` para el *named pipe* de mpv en Windows.
 
-class _WinPipeSocket:
-    """
-    Sustituto de ``socket.socket`` para el *named pipe* de mpv en Windows.
+        mpv expone ``--input-ipc-server=NAME`` en Windows como un *named pipe*
+        (``\\\\.\\pipe\\NAME``), no como un socket Unix, y el CPython oficial de
+        Windows no define ``socket.AF_UNIX`` (aunque el sistema sí lo soporta
+        desde hace años).
 
-    mpv expone ``--input-ipc-server=NAME`` en Windows como un *named pipe*
-    (``\\\\.\\pipe\\NAME``), no como un socket Unix, y el CPython oficial de Windows
-    no define ``socket.AF_UNIX`` (aunque el sistema sí lo soporta desde hace años).
+        Un objeto de archivo normal (``open(path, "r+b")``) basta para leer y
+        escribir, pero no tiene ``settimeout`` ni ``MSG_PEEK``, y un primer
+        intento con un hilo de fondo bloqueado en ``read()`` resultó en que
+        ``close()`` se queda colgado: cerrar un *handle* de Windows mientras
+        otro hilo tiene una lectura síncrona pendiente sobre él no la cancela
+        (a diferencia de un socket Unix). En vez de eso, ``PeekNamedPipe``
+        (ctypes; no hace falta ``pywin32``) consulta sin bloquear cuántos bytes
+        hay esperando, así que ``recv``/``MSG_PEEK`` y la lectura línea a línea
+        sondean con una espera corta entre intentos — igual que
+        ``_probe_version`` ya hace con ``MSG_PEEK`` real en la rama POSIX.
+        Nunca hay una lectura bloqueante que ``close()`` necesite interrumpir.
+        """
 
-    Un objeto de archivo normal (``open(path, "r+b")``) basta para leer y escribir,
-    pero no tiene ``settimeout`` ni ``MSG_PEEK``, y un primer intento con un hilo de
-    fondo bloqueado en ``read()`` resultó en que ``close()`` se queda colgado:
-    cerrar un *handle* de Windows mientras otro hilo tiene una lectura síncrona
-    pendiente sobre él no la cancela (a diferencia de un socket Unix). En vez de
-    eso, ``PeekNamedPipe`` (ctypes; no hace falta ``pywin32``) consulta sin
-    bloquear cuántos bytes hay esperando, así que ``recv``/``MSG_PEEK`` y la
-    lectura línea a línea sondean con una espera corta entre intentos — igual que
-    ``_probe_version`` ya hace con ``MSG_PEEK`` real en la rama POSIX. Nunca hay
-    una lectura bloqueante que ``close()`` necesite interrumpir.
-    """
+        _POLL_S = 0.01
 
-    _POLL_S = 0.01
+        def __init__(self, path: str) -> None:
+            fh: BinaryIO = open(path, "r+b", buffering=0)  # noqa: SIM115 (vive hasta close())
+            self._fh = fh
+            self._handle = msvcrt.get_osfhandle(self._fh.fileno())
+            self._closed = False
+            self._timeout: float | None = None
 
-    def __init__(self, path: str) -> None:
-        self._fh = open(path, "r+b", buffering=0)  # noqa: SIM115 (vive hasta close())
-        self._handle = msvcrt.get_osfhandle(self._fh.fileno())
-        self._closed = False
-        self._timeout: float | None = None
+        def sendall(self, data: bytes) -> None:
+            self._fh.write(data)
 
-    def sendall(self, data: bytes) -> None:
-        self._fh.write(data)
+        def recv(self, nbytes: int, flags: int = 0) -> bytes:
+            deadline = None if self._timeout is None else time.monotonic() + self._timeout
+            while True:
+                peeked = _peek_named_pipe(self._handle, nbytes)
+                if peeked is None:
+                    return b""  # pipe roto: equivalente a EOF
+                if peeked:
+                    break
+                if deadline is not None and time.monotonic() > deadline:
+                    raise TimeoutError("tiempo agotado leyendo el pipe de mpv")
+                time.sleep(self._POLL_S)
+            if flags & socket.MSG_PEEK:
+                return peeked
+            return self._fh.read(len(peeked))  # ya confirmado disponible: no bloquea
 
-    def recv(self, nbytes: int, flags: int = 0) -> bytes:
-        deadline = None if self._timeout is None else time.monotonic() + self._timeout
-        while True:
-            peeked = _peek_named_pipe(self._handle, nbytes)
-            if peeked is None:
-                return b""  # pipe roto: equivalente a EOF
-            if peeked:
-                break
-            if deadline is not None and time.monotonic() > deadline:
-                raise TimeoutError("tiempo agotado leyendo el pipe de mpv")
-            time.sleep(self._POLL_S)
-        if flags & socket.MSG_PEEK:
-            return peeked
-        return self._fh.read(len(peeked))  # ya confirmado disponible: no bloquea
+        def settimeout(self, value: float | None) -> None:
+            self._timeout = value
 
-    def settimeout(self, value: float | None) -> None:
-        self._timeout = value
+        def shutdown(self, how: int) -> None:
+            pass  # un solo canal de lectura/escritura: close() lo cierra entero
 
-    def shutdown(self, how: int) -> None:
-        pass  # un solo canal de lectura/escritura: close() lo cierra entero
+        def close(self) -> None:
+            self._closed = True
+            try:
+                self._fh.close()
+            except OSError:
+                pass
 
-    def close(self) -> None:
-        self._closed = True
-        try:
-            self._fh.close()
-        except OSError:
-            pass
+        def makefile(self, mode: str) -> _WinPipeLineReader:
+            return _WinPipeLineReader(self)
 
-    def makefile(self, mode: str) -> _WinPipeLineReader:
-        return _WinPipeLineReader(self)
+    class _WinPipeLineReader:
+        """Líneas del *pipe* de ``_WinPipeSocket`` (equivalente a ``sock.makefile("rb")``)."""
 
+        _PEEK_BYTES = 65536
+        _POLL_S = _WinPipeSocket._POLL_S
 
-class _WinPipeLineReader:
-    """Líneas del *pipe* de ``_WinPipeSocket`` (equivalente a ``sock.makefile("rb")``)."""
+        def __init__(self, owner: _WinPipeSocket) -> None:
+            self._owner = owner
 
-    _PEEK_BYTES = 65536
-    _POLL_S = _WinPipeSocket._POLL_S
+        def __enter__(self) -> _WinPipeLineReader:
+            return self
 
-    def __init__(self, owner: _WinPipeSocket) -> None:
-        self._owner = owner
+        def __exit__(self, *exc: object) -> None:
+            pass  # el pipe lo cierra el backend, no este envoltorio
 
-    def __enter__(self) -> _WinPipeLineReader:
-        return self
+        def __iter__(self) -> _WinPipeLineReader:
+            return self
 
-    def __exit__(self, *exc: object) -> None:
-        pass  # el pipe lo cierra el backend, no este envoltorio
-
-    def __iter__(self) -> _WinPipeLineReader:
-        return self
-
-    def __next__(self) -> bytes:
-        owner = self._owner
-        while True:
-            if owner._closed:
-                raise StopIteration
-            peeked = _peek_named_pipe(owner._handle, self._PEEK_BYTES)
-            if peeked is None:
-                raise StopIteration  # pipe roto: como agotar sock.makefile("rb")
-            idx = peeked.find(b"\n")
-            if idx >= 0:
-                try:
-                    return owner._fh.read(idx + 1)  # ya confirmado: no bloquea
-                except OSError:
-                    raise StopIteration from None  # cerrado justo entre medias
-            time.sleep(self._POLL_S)
+        def __next__(self) -> bytes:
+            owner = self._owner
+            while True:
+                if owner._closed:
+                    raise StopIteration
+                peeked = _peek_named_pipe(owner._handle, self._PEEK_BYTES)
+                if peeked is None:
+                    raise StopIteration  # pipe roto: como agotar sock.makefile("rb")
+                idx = peeked.find(b"\n")
+                if idx >= 0:
+                    try:
+                        return owner._fh.read(idx + 1)  # ya confirmado: no bloquea
+                    except OSError:
+                        raise StopIteration from None  # cerrado justo entre medias
+                time.sleep(self._POLL_S)
 
 
 class MpvError(RuntimeError):
