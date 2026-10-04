@@ -550,14 +550,21 @@ Cada fase termina en una rama/PR con **criterios de aceptación** verificables.
 1. **Nombre de la emisora** (afecta jingles y prompts).
 2. **Idioma(s)** de la radio: ¿solo español, o alternar con catalán? (afecta TTS, prompts y fuentes).
 3. **Proveedor de TTS** principal (nube vs. Piper local) y presupuesto mensual.
+   → *Resuelta (2026-09-24):* Piper local por defecto (offline, sin coste por carácter); la nube
+   (ElevenLabs) queda implementada pero desactivada. El presupuesto mensual sigue en `station.yaml →
+   budget.monthly_eur` (valor provisional). Ver ADR 0003.
 4. **Voz del locutor:** sintética genérica o voz propia clonada (con consentimiento propio).
+   → *Resuelta (2026-09-24):* voz sintética genérica por ahora (`locutor_principal`, modelo de
+   Piper; su licencia la revisa la dueña antes de emitir). Clonar la voz propia más adelante sigue
+   siendo posible (con `consent: true`). Ver ADR 0003.
 5. **Dónde se producen los segmentos:** en la propia Pi o en el portátil con sincronización.
 6. **Fuentes de noticias** concretas (2-3 medios con RSS).
 7. **Calendario y datos personales:** qué se conecta y qué queda fuera de la radio.
 8. **Feed exacto de Tiny Desk** en audio (verificar URL y términos de uso en el momento de implementarlo).
    → *Resuelta (2026-09-24):* `https://feeds.npr.org/510306/podcast.xml` ("Tiny Desk Concerts - Audio").
    Términos de NPR: uso personal y no comercial, sin modificar el contenido, sin usarlo para construir o
-   entrenar sistemas de IA. Pendiente de revisar antes de la Fase 2 (descripciones del episodio como fuente del LLM).
+   entrenar sistemas de IA. Revisado para la Fase 2: la descripción del episodio **no** se usa como fuente del LLM
+   ni se guarda; las intros se basan solo en MusicBrainz y Wikipedia (ADR 0003).
 9. **Deporte inventado** y su bible de reglas (para `liga`).
 
 ---

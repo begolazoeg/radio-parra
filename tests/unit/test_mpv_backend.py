@@ -98,7 +98,9 @@ def test_command_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ) as b:
         assert b.alive()
         sock = b.socket_path
-        assert sock is not None and sock.exists()
+        assert sock is not None
+        if sys.platform != "win32":
+            assert sock.exists()  # en Windows es un named pipe: sin archivo real
     args = json.loads(argv_log.read_text().splitlines()[0])
     assert args[:4] == ["--idle=yes", "--no-video", "--no-terminal", "--audio-display=no"]
     assert f"--input-ipc-server={sock}" in args

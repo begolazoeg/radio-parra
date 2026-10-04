@@ -38,6 +38,14 @@ class AudioConfig(BaseModel):
     mpv_bin: str = "mpv"
     # Argumentos extra para mpv, p. ej. ["--audio-device=alsa/plughw:CARD=Device"]
     mpv_args: list[str] = Field(default_factory=list)
+    # Normalización en reproducción (radio.station.gain): ganancia por archivo hacia
+    # station.loudness_lufs a partir de meta.loudness_lufs/true_peak_db, sin tocar el
+    # archivo (la música de Tiny Desk no se puede modificar). False = todo a 0 dB.
+    normalize: StrictBool = True
+    gain_min_db: float = Field(default=-12.0, le=0.0)
+    gain_max_db: float = Field(default=6.0, ge=0.0)
+    # El pico verdadero con la ganancia aplicada no pasa de aquí (dBTP)
+    true_peak_ceiling_db: float = Field(default=-1.0, le=0.0)
 
 
 class InterruptsConfig(BaseModel):

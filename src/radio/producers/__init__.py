@@ -11,9 +11,11 @@ from radio.producers.base import (
     RunStats,
     StagedProducer,
     budget_exhausted,
+    call_llm,
     pick_voice,
     write_segment_audio,
 )
+from radio.producers.host_intro import HostIntroProducer
 from radio.producers.music_tinydesk import MusicTinyDeskProducer
 from radio.producers.post import AudioPost, FfmpegLoudnorm, NullPost, choose_post
 from radio.producers.registry import PRODUCERS, build_producer, build_producers
@@ -32,6 +34,7 @@ __all__ = [
     "Draft",
     "DraftRejected",
     "FfmpegLoudnorm",
+    "HostIntroProducer",
     "MusicTinyDeskProducer",
     "NullPost",
     "ProduceReport",
@@ -46,6 +49,7 @@ __all__ = [
     "build_context",
     "build_producer",
     "build_producers",
+    "call_llm",
     "choose_post",
     "pick_voice",
     "produce",

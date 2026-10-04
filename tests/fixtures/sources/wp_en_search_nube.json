@@ -1,0 +1,29 @@
+{
+  "_comment": "Respuesta sintética con la forma real de la API; 'Nube Ferrán' es una artista ficticia y ningún id ni texto corresponde a nada real.",
+  "batchcomplete": "",
+  "query": {
+    "searchinfo": {
+      "totalhits": 2
+    },
+    "search": [
+      {
+        "ns": 0,
+        "title": "Nube Ferrari",
+        "pageid": 99900030,
+        "size": 900,
+        "wordcount": 120,
+        "snippet": "racing",
+        "timestamp": "2026-07-01T00:00:00Z"
+      },
+      {
+        "ns": 0,
+        "title": "Nube Ferrán (singer)",
+        "pageid": 99900012,
+        "size": 3000,
+        "wordcount": 400,
+        "snippet": "is a fictional singer",
+        "timestamp": "2026-07-01T00:00:00Z"
+      }
+    ]
+  }
+}

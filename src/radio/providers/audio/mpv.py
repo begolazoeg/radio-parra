@@ -57,6 +57,28 @@ Si mpv muere o el socket se cae:
 Los ``play()`` bloqueados sobre el archivo descartado vuelven; los de pendientes
 siguen esperando a que suenen en el mpv relanzado.
 
+Ganancia por archivo (normalización en reproducción)
+---------------------------------------------------
+``enqueue(path, gain_db=g)`` con ``g ≠ 0`` pasa a ``loadfile`` **opciones por archivo**:
+``af=[lavfi-volume=volume=<g>dB]`` (filtro ``volume`` de libavfilter entre corchetes,
+que es como mpv acepta ``=`` dentro de un valor). mpv aplica las opciones por archivo
+solo mientras suena ese archivo y restaura las globales al acabar, así que la ganancia
+no pasa al siguiente. El archivo en disco no se toca (la música de Tiny Desk no se
+puede modificar). Si ``extra_args`` trae un ``--af=...`` global, se antepone para no
+perderlo durante ese archivo. Con ``g = 0`` no se envían opciones (vale en cualquier mpv).
+
+La lista de argumentos de ``loadfile`` cambió en **mpv 0.38**:
+
+- mpv ≥ 0.38: ``loadfile <url> <flags> <index> <options>`` (``index`` = −1: sin uso con
+  ``append-play``).
+- mpv < 0.38 (p. ej. el de Raspberry Pi OS bookworm, 0.35): ``loadfile <url> <flags>
+  <options>``.
+
+Al conectar (también tras cada relanzamiento) se pregunta ``get_property mpv-version``
+**antes** de arrancar el hilo lector y se elige la forma. Si la versión no se puede
+leer o interpretar, se avisa y se encola **sin ganancia** (mejor 0 dB que un
+``loadfile`` rechazado y silencio).
+
 Cierre
 ------
 ``close()`` pide ``quit`` a mpv (y si no sale, ``terminate``/``kill``), recoge el proceso
@@ -71,9 +93,11 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -83,7 +107,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import Any, BinaryIO, Literal, Protocol
 
 from radio.core.clock import Clock, SystemClock
 from radio.providers.audio.events import (
@@ -108,6 +132,190 @@ _REASONS: dict[str, EndReason] = {
 # Intervalo de sondeo mientras mpv crea el socket (solo al arrancar, acotado)
 _CONNECT_POLL_S = 0.02
 
+# request_id reservado para la pregunta de versión (el resto empieza en 1)
+_VERSION_REQUEST_ID = 0
+
+# Primera versión con ``loadfile <url> <flags> <index> <options>``
+LOADFILE_INDEX_VERSION = (0, 38)
+
+# Forma de ``loadfile``: con índice (≥ 0.38), sin él (< 0.38) o desconocida (sin opciones)
+LoadfileStyle = Literal["index", "legacy", "unknown"]
+
+# Tope de lo que se mira de golpe al leer la respuesta de versión
+_PEEK_BYTES = 65536
+
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)")
+
+# Por debajo de esto no se envían opciones por archivo (0 dB)
+_GAIN_EPSILON_DB = 0.005
+
+
+def parse_mpv_version(text: str | None) -> tuple[int, int] | None:
+    """``"mpv 0.35.1"`` / ``"mpv v0.38.0-dirty"`` → ``(0, 35)`` / ``(0, 38)``; None si no se entiende."""
+    if not text:
+        return None
+    match = _VERSION_RE.search(text)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def loadfile_style(version: str | None) -> LoadfileStyle:
+    """Forma de ``loadfile`` para la versión que informa mpv."""
+    parsed = parse_mpv_version(version)
+    if parsed is None:
+        return "unknown"
+    return "index" if parsed >= LOADFILE_INDEX_VERSION else "legacy"
+
+
+def gain_filter(gain_db: float, base_af: str | None = None) -> str:
+    """Valor de la opción ``af`` para una ganancia (con el ``--af`` global delante)."""
+    volume = f"lavfi-volume=volume={gain_db:.2f}dB"
+    return f"[{base_af},{volume}]" if base_af else f"[{volume}]"
+
+
+class _IpcSocket(Protocol):
+    """
+    Subconjunto de ``socket.socket`` que usa este módulo: lo implementan tanto el
+    socket Unix real (Linux/Pi/macOS) como ``_WinPipeSocket`` (Windows, ver abajo).
+    """
+
+    def sendall(self, data: bytes) -> None: ...
+    def recv(self, nbytes: int, flags: int = 0) -> bytes: ...
+    def settimeout(self, value: float | None) -> None: ...
+    def shutdown(self, how: int) -> None: ...
+    def close(self) -> None: ...
+    def makefile(self, mode: Literal["rb"]) -> Any: ...
+
+
+if sys.platform == "win32":
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.PeekNamedPipe.argtypes = [
+        wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _kernel32.PeekNamedPipe.restype = wintypes.BOOL
+
+    def _peek_named_pipe(handle: int, nbytes: int) -> bytes | None:
+        """
+        Hasta ``nbytes`` del *pipe* sin consumirlos (``None`` si está roto/cerrado).
+
+        A diferencia de ``socket.recv(n, MSG_PEEK)``, nunca bloquea: con el *pipe*
+        vacío devuelve 0 bytes al instante, así que quien llama sondea en bucle.
+        """
+        buf = ctypes.create_string_buffer(nbytes) if nbytes else None
+        bytes_read = wintypes.DWORD(0)
+        ok = _kernel32.PeekNamedPipe(
+            handle, buf, nbytes, ctypes.byref(bytes_read), None, None
+        )
+        if not ok:
+            return None
+        return buf.raw[: bytes_read.value] if buf else b""
+
+    class _WinPipeSocket:
+        """
+        Sustituto de ``socket.socket`` para el *named pipe* de mpv en Windows.
+
+        mpv expone ``--input-ipc-server=NAME`` en Windows como un *named pipe*
+        (``\\\\.\\pipe\\NAME``), no como un socket Unix, y el CPython oficial de
+        Windows no define ``socket.AF_UNIX`` (aunque el sistema sí lo soporta
+        desde hace años).
+
+        Un objeto de archivo normal (``open(path, "r+b")``) basta para leer y
+        escribir, pero no tiene ``settimeout`` ni ``MSG_PEEK``, y un primer
+        intento con un hilo de fondo bloqueado en ``read()`` resultó en que
+        ``close()`` se queda colgado: cerrar un *handle* de Windows mientras
+        otro hilo tiene una lectura síncrona pendiente sobre él no la cancela
+        (a diferencia de un socket Unix). En vez de eso, ``PeekNamedPipe``
+        (ctypes; no hace falta ``pywin32``) consulta sin bloquear cuántos bytes
+        hay esperando, así que ``recv``/``MSG_PEEK`` y la lectura línea a línea
+        sondean con una espera corta entre intentos — igual que
+        ``_probe_version`` ya hace con ``MSG_PEEK`` real en la rama POSIX.
+        Nunca hay una lectura bloqueante que ``close()`` necesite interrumpir.
+        """
+
+        _POLL_S = 0.01
+
+        def __init__(self, path: str) -> None:
+            fh: BinaryIO = open(path, "r+b", buffering=0)  # noqa: SIM115 (vive hasta close())
+            self._fh = fh
+            self._handle = msvcrt.get_osfhandle(self._fh.fileno())
+            self._closed = False
+            self._timeout: float | None = None
+
+        def sendall(self, data: bytes) -> None:
+            self._fh.write(data)
+
+        def recv(self, nbytes: int, flags: int = 0) -> bytes:
+            deadline = None if self._timeout is None else time.monotonic() + self._timeout
+            while True:
+                peeked = _peek_named_pipe(self._handle, nbytes)
+                if peeked is None:
+                    return b""  # pipe roto: equivalente a EOF
+                if peeked:
+                    break
+                if deadline is not None and time.monotonic() > deadline:
+                    raise TimeoutError("tiempo agotado leyendo el pipe de mpv")
+                time.sleep(self._POLL_S)
+            if flags & socket.MSG_PEEK:
+                return peeked
+            return self._fh.read(len(peeked))  # ya confirmado disponible: no bloquea
+
+        def settimeout(self, value: float | None) -> None:
+            self._timeout = value
+
+        def shutdown(self, how: int) -> None:
+            pass  # un solo canal de lectura/escritura: close() lo cierra entero
+
+        def close(self) -> None:
+            self._closed = True
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+
+        def makefile(self, mode: str) -> _WinPipeLineReader:
+            return _WinPipeLineReader(self)
+
+    class _WinPipeLineReader:
+        """Líneas del *pipe* de ``_WinPipeSocket`` (equivalente a ``sock.makefile("rb")``)."""
+
+        _PEEK_BYTES = 65536
+        _POLL_S = _WinPipeSocket._POLL_S
+
+        def __init__(self, owner: _WinPipeSocket) -> None:
+            self._owner = owner
+
+        def __enter__(self) -> _WinPipeLineReader:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            pass  # el pipe lo cierra el backend, no este envoltorio
+
+        def __iter__(self) -> _WinPipeLineReader:
+            return self
+
+        def __next__(self) -> bytes:
+            owner = self._owner
+            while True:
+                if owner._closed:
+                    raise StopIteration
+                peeked = _peek_named_pipe(owner._handle, self._PEEK_BYTES)
+                if peeked is None:
+                    raise StopIteration  # pipe roto: como agotar sock.makefile("rb")
+                idx = peeked.find(b"\n")
+                if idx >= 0:
+                    try:
+                        return owner._fh.read(idx + 1)  # ya confirmado: no bloquea
+                    except OSError:
+                        raise StopIteration from None  # cerrado justo entre medias
+                time.sleep(self._POLL_S)
+
 
 class MpvError(RuntimeError):
     """mpv no arranca, no responde o el backend está cerrado."""
@@ -118,6 +326,7 @@ class _Item:
     """Un archivo encolado (identidad por objeto: el mismo path puede ir dos veces)."""
 
     path: Path
+    gain_db: float = 0.0
     done: bool = False
 
 
@@ -128,13 +337,16 @@ class MpvIpcBackend:
     API pública
     -----------
     - ``start()``: lanza mpv y conecta (opcional: cualquier ``enqueue``/``play`` lo hace).
-    - ``enqueue(path)``: añade a la playlist de mpv (``append-play``).
+    - ``enqueue(path, gain_db=0.0)``: añade a la playlist de mpv (``append-play``), con
+      la ganancia como opción por archivo (ver *Ganancia por archivo*).
     - ``play(path)``: ``enqueue`` + bloquear hasta que ese archivo termine.
     - ``skip()``: corta el archivo en curso (``playlist-next force``).
     - ``clear_pending()``: descarta lo encolado que no ha empezado (``playlist-clear``).
     - ``add_listener(cb)`` / ``remove_listener(cb)``: eventos ``Started``/``Ended``.
     - ``queued()``, ``current()``, ``alive()``, ``idle()``, ``restarts``.
     - ``mpv_playlist()``: playlist tal y como la ve mpv (diagnóstico).
+    - ``mpv_version`` / ``loadfile_style``: versión detectada y forma de ``loadfile``.
+    - ``loadfile_command(path, gain_db)``: el ``loadfile`` que se enviaría.
     - ``close()``: parada limpia. También sirve como gestor de contexto.
 
     Parámetros
@@ -179,7 +391,7 @@ class MpvIpcBackend:
         self._current: _Item | None = None
         self._finished_in_playlist = 0  # entradas terminadas que siguen en la playlist
         self._proc: subprocess.Popen[bytes] | None = None
-        self._sock: socket.socket | None = None
+        self._sock: _IpcSocket | None = None
         self._reader: threading.Thread | None = None
         self._supervisor: threading.Thread | None = None
         self._generation = 0
@@ -194,6 +406,9 @@ class MpvIpcBackend:
         self._replies: dict[int, dict[str, Any]] = {}
         self._wake = threading.Event()  # despierta al watchdog (caída o cierre)
         self._closing = threading.Event()
+        self._version: str | None = None
+        self._style: LoadfileStyle = "unknown"
+        self._warned_style = False
 
     # ── Ciclo de vida ────────────────────────────────────────────────────────
 
@@ -229,9 +444,9 @@ class MpvIpcBackend:
             if self._socket_path is None:
                 self._socket_dir = Path(tempfile.mkdtemp(prefix="radio-mpv-"))
                 self._socket_path = self._socket_dir / "mpv.sock"
-            proc, sock = self._spawn_and_connect()
+            proc, sock, version = self._spawn_and_connect()
             with self._cond:
-                self._install_locked(proc, sock)
+                self._install_locked(proc, sock, version)
                 self._started = True
             self._supervisor = threading.Thread(
                 target=self._supervise, name="mpv-watchdog", daemon=True
@@ -286,9 +501,12 @@ class MpvIpcBackend:
 
     # ── API de reproducción ──────────────────────────────────────────────────
 
-    def enqueue(self, path: Path) -> None:
-        """Añade ``path`` al final de la playlist; si mpv está parado, empieza ya."""
-        self._enqueue_item(path)
+    def enqueue(self, path: Path, *, gain_db: float = 0.0) -> None:
+        """
+        Añade ``path`` al final de la playlist; si mpv está parado, empieza ya.
+        ``gain_db`` se aplica solo a este archivo (opción por archivo de ``loadfile``).
+        """
+        self._enqueue_item(path, gain_db)
 
     def play(self, path: Path) -> None:
         """
@@ -366,6 +584,34 @@ class MpvIpcBackend:
         with self._cond:
             return self._proc.pid if self._proc is not None else None
 
+    @property
+    def mpv_version(self) -> str | None:
+        """Versión que informó mpv al conectar (``None`` si no se pudo leer)."""
+        with self._cond:
+            return self._version
+
+    @property
+    def loadfile_style(self) -> LoadfileStyle:
+        """``index`` (mpv ≥ 0.38), ``legacy`` (< 0.38) o ``unknown`` (sin ganancia)."""
+        with self._cond:
+            return self._style
+
+    def global_af(self) -> str | None:
+        """Último ``--af=...`` de ``extra_args`` (se conserva al aplicar la ganancia)."""
+        value = None
+        for arg in self.extra_args:
+            if arg.startswith("--af="):
+                value = arg.split("=", 1)[1] or None
+        return value
+
+    def loadfile_command(self, path: Path, gain_db: float = 0.0) -> list[Any]:
+        """
+        Comando ``loadfile`` para ``path`` con su ganancia, en la forma de la versión
+        de mpv conectada (ver *Ganancia por archivo* en el docstring del módulo).
+        """
+        with self._cond:
+            return self._loadfile_locked(_Item(Path(path), gain_db))
+
     def mpv_playlist(self) -> list[dict[str, Any]]:
         """Playlist según mpv (``get_property playlist``)."""
         data = self._request(["get_property", "playlist"])
@@ -373,22 +619,47 @@ class MpvIpcBackend:
 
     # ── Internos: cola ───────────────────────────────────────────────────────
 
-    def _enqueue_item(self, path: Path) -> _Item:
+    def _enqueue_item(self, path: Path, gain_db: float = 0.0) -> _Item:
         self.start()
         with self._cond:
             if self._closed:
                 raise MpvError("el backend mpv está cerrado")
-            item = _Item(Path(path))
+            item = _Item(Path(path), float(gain_db))
             self._pending.append(item)
             if self._connected:
-                self._send_locked(["loadfile", str(item.path), "append-play"])
+                self._send_locked(self._loadfile_locked(item))
             # Si no hay conexión, el watchdog lo enviará al relanzar mpv
             return item
 
     # ── Internos: proceso y socket ───────────────────────────────────────────
 
-    def _spawn_and_connect(self) -> tuple[subprocess.Popen[bytes], socket.socket]:
-        """Lanza mpv y espera (acotado) a que acepte conexiones en el socket."""
+    def _connect_once(self) -> _IpcSocket:
+        """
+        Un intento de conexión al IPC de mpv; ``OSError`` si todavía no está listo.
+
+        En Windows mpv expone ``--input-ipc-server=NAME`` como *named pipe*
+        (``\\\\.\\pipe\\NAME``), no como socket Unix (el CPython de Windows no
+        define ``socket.AF_UNIX``); en todo lo demás, el mismo nombre que ya se
+        usa como ruta de socket (inv. 10: mismo código, el adaptador cambia).
+        """
+        assert self._socket_path is not None
+        if sys.platform == "win32":
+            return _WinPipeSocket(f"\\\\.\\pipe\\{self._socket_path}")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(str(self._socket_path))
+        except OSError:
+            sock.close()
+            raise
+        return sock
+
+    def _spawn_and_connect(
+        self,
+    ) -> tuple[subprocess.Popen[bytes], _IpcSocket, str | None]:
+        """
+        Lanza mpv, espera (acotado) a que acepte conexiones en el socket y pregunta su
+        versión (``None`` si no contesta a tiempo).
+        """
         assert self._socket_path is not None
         self._socket_path.unlink(missing_ok=True)
         cmd = self.command()
@@ -406,12 +677,12 @@ class MpvIpcBackend:
             code = proc.poll()
             if code is not None:
                 raise MpvError(f"mpv salió al arrancar con código {code}")
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
-                sock.connect(str(self._socket_path))
-                return proc, sock
+                sock = self._connect_once()
             except OSError:
-                sock.close()
+                pass
+            else:
+                return proc, sock, self._probe_version(sock)
             if time.monotonic() > deadline:
                 self._dispose(proc, None, grace=0.0)
                 raise MpvError(f"mpv no abrió el socket {self._socket_path} a tiempo")
@@ -419,8 +690,63 @@ class MpvIpcBackend:
                 self._dispose(proc, None, grace=0.0)
                 raise MpvError("backend cerrado mientras arrancaba mpv")
 
-    def _install_locked(self, proc: subprocess.Popen[bytes], sock: socket.socket) -> None:
+    def _probe_version(self, sock: _IpcSocket) -> str | None:
+        """
+        ``get_property mpv-version`` antes de que exista el hilo lector. Se lee del
+        socket **línea a línea** (``MSG_PEEK`` hasta el salto de línea y luego solo esos
+        bytes) para no consumir eventos que lleguen detrás. Los mensajes anteriores a
+        la respuesta (eventos de arranque) se descartan: mpv está vacío e inactivo.
+        """
+        request = {"command": ["get_property", "mpv-version"], "request_id": _VERSION_REQUEST_ID}
+        deadline = time.monotonic() + self.request_timeout
+        try:
+            sock.sendall((json.dumps(request) + "\n").encode())
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    log.warning("mpv no dijo su versión a tiempo")
+                    return None
+                sock.settimeout(left)
+                peek = sock.recv(_PEEK_BYTES, socket.MSG_PEEK)
+                if not peek:
+                    return None
+                end = peek.find(b"\n")
+                if end < 0:
+                    if len(peek) >= _PEEK_BYTES:
+                        return None
+                    time.sleep(_CONNECT_POLL_S)     # línea a medias: que llegue el resto
+                    continue
+                line = sock.recv(end + 1)
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(msg, dict) and msg.get("request_id") == _VERSION_REQUEST_ID:
+                    data = msg.get("data")
+                    if msg.get("error") != "success" or not isinstance(data, str):
+                        return None
+                    return data
+        except OSError as exc:
+            log.warning("No se pudo preguntar la versión a mpv: %s", exc)
+            return None
+        finally:
+            try:
+                sock.settimeout(None)
+            except OSError:
+                pass
+
+    def _install_locked(
+        self, proc: subprocess.Popen[bytes], sock: _IpcSocket, version: str | None
+    ) -> None:
         """Adopta una conexión nueva y reenvía los pendientes en orden."""
+        style = loadfile_style(version)
+        if style != self._style or version != self._version:
+            log.info("mpv %s: loadfile %s", version or "(versión desconocida)", {
+                "index": "con índice (≥ 0.38)", "legacy": "en la forma antigua (< 0.38)",
+                "unknown": "sin opciones por archivo",
+            }[style])
+        self._version = version
+        self._style = style
         self._generation += 1
         gen = self._generation
         self._proc, self._sock = proc, sock
@@ -433,12 +759,27 @@ class MpvIpcBackend:
         self._reader.start()
         self._send_locked(["observe_property", 1, "idle-active"])
         for item in self._pending:
-            self._send_locked(["loadfile", str(item.path), "append-play"])
+            self._send_locked(self._loadfile_locked(item))
+
+    def _loadfile_locked(self, item: _Item) -> list[Any]:
+        cmd: list[Any] = ["loadfile", str(item.path), "append-play"]
+        if abs(item.gain_db) < _GAIN_EPSILON_DB:
+            return cmd
+        if self._style == "unknown":
+            if not self._warned_style:
+                self._warned_style = True
+                log.warning("Versión de mpv desconocida (%r): se reproduce sin ganancia "
+                            "por archivo", self._version)
+            return cmd
+        options = f"af={gain_filter(item.gain_db, self.global_af())}"
+        if self._style == "index":
+            return [*cmd, -1, options]
+        return [*cmd, options]
 
     def _dispose(
         self,
         proc: subprocess.Popen[bytes] | None,
-        sock: socket.socket | None,
+        sock: _IpcSocket | None,
         *,
         grace: float,
     ) -> None:
@@ -509,7 +850,7 @@ class MpvIpcBackend:
             raise MpvError(f"mpv rechazó {command[0]}: {reply.get('error')}")
         return reply.get("data")
 
-    def _read_loop(self, gen: int, sock: socket.socket) -> None:
+    def _read_loop(self, gen: int, sock: _IpcSocket) -> None:
         """Hilo lector: una línea JSON por mensaje; termina al cerrarse el socket."""
         try:
             with sock.makefile("rb") as stream:
@@ -639,7 +980,7 @@ class MpvIpcBackend:
             if self._closing.wait(delay):
                 return False
             try:
-                proc, sock = self._spawn_and_connect()
+                proc, sock, version = self._spawn_and_connect()
             except MpvError as exc:
                 log.error("No se pudo relanzar mpv: %s", exc)
                 with self._cond:
@@ -651,7 +992,7 @@ class MpvIpcBackend:
                 else:
                     closed = False
                     self._restarts += 1
-                    self._install_locked(proc, sock)
+                    self._install_locked(proc, sock, version)
             if closed:
                 self._dispose(proc, sock, grace=0.0)
                 return False

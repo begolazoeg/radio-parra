@@ -15,6 +15,7 @@ import wave
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 import yaml
 
 from radio.core.models import Segment
@@ -35,11 +36,33 @@ def make_wav(path: Path, seconds: float) -> Path:
     return path
 
 
+def _install_fake_mpv_wrapper(tmp_path: Path) -> Path:
+    """
+    Envoltorio ejecutable de ``fake_mpv.py`` para ``station.yaml → audio.mpv_bin``.
+    En Windows no hay ``/bin/sh`` ni shebang: un ``.bat`` sí lo ejecuta
+    ``subprocess.Popen`` directamente (ver ``install_fake_piper`` en
+    ``tests/fixtures/providers.py`` para el mismo patrón).
+    """
+    if sys.platform == "win32":
+        wrapper = tmp_path / "mpv.bat"
+        wrapper.write_text(f'@echo off\r\n"{sys.executable}" "{FAKE_MPV}" %*\r\n', encoding="utf-8")
+    else:
+        wrapper = tmp_path / "mpv"
+        wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {FAKE_MPV} \"$@\"\n")
+        wrapper.chmod(0o755)
+    return wrapper
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="os.kill(self, SIGTERM) en Windows llama a TerminateProcess directamente "
+    "(comprobado a mano): mata el proceso entero sin pasar por el manejador de "
+    "señal registrado, así que este mecanismo de apagado ordenado no es portable "
+    "tal cual. No es un fallo de radio station ni de mpv.",
+)
 def test_run_station_plays_and_stops_on_sigterm(tmp_path: Path) -> None:
     # mpv falso como ejecutable (station.yaml → audio.mpv_bin)
-    wrapper = tmp_path / "mpv"
-    wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {FAKE_MPV} \"$@\"\n")
-    wrapper.chmod(0o755)
+    wrapper = _install_fake_mpv_wrapper(tmp_path)
     config = tmp_path / "config"
     shutil.copytree(REPO / "config", config)
     station = yaml.safe_load((config / "station.yaml").read_text(encoding="utf-8"))

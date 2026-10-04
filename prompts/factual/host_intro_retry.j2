@@ -1,0 +1,18 @@
+{# host_intro/v1 — reintento con prompt más estricto (§4.2 paso 3) #}
+{% if fact_free %}
+{% include "host_intro_fact_free.j2" %}
+{% else %}
+{% include "host_intro_user.j2" %}
+{% endif %}
+
+Tu respuesta anterior NO ha pasado la verificación. Problemas encontrados:
+{% for p in problems %}
+- {{ p | data }}
+{% endfor %}
+
+Reescríbela con reglas más estrictas:
+- Quita cualquier dato que no esté, tal cual, en la fuente que citas; no lo sustituyas por otro.
+- Cada número, fecha y nombre propio del guion debe aparecer también en el "text" de un claim y en la fuente que ese claim cita.
+- Si un problema señala una palabra corriente a inicio de frase (por ejemplo «Subid»), reescribe esa frase para que empiece de otra forma.
+- Mejor pocos datos y seguros que muchos dudosos. Si no puedes cumplir, escribe la intro sin datos y con "claims" vacío.
+- Respeta el límite de {{ max_chars }} caracteres y escribe dos o tres frases.

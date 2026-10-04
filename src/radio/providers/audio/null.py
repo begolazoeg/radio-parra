@@ -15,7 +15,8 @@ from typing import Any
 class NullAudioBackend:
     """
     Backend de audio que no hace nada de verdad.
-    Registra play/enqueue/skip en self.calls para aserciones en tests.
+    Registra play/enqueue/skip en self.calls para aserciones en tests (``enqueue``
+    con su ``gain_db``).
     """
 
     def __init__(self) -> None:
@@ -24,8 +25,8 @@ class NullAudioBackend:
     def play(self, path: Path) -> None:
         self.calls.append({"action": "play", "path": path})
 
-    def enqueue(self, path: Path) -> None:
-        self.calls.append({"action": "enqueue", "path": path})
+    def enqueue(self, path: Path, *, gain_db: float = 0.0) -> None:
+        self.calls.append({"action": "enqueue", "path": path, "gain_db": gain_db})
 
     def skip(self) -> None:
         self.calls.append({"action": "skip"})

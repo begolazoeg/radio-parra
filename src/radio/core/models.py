@@ -10,6 +10,8 @@ Convenciones de ``Segment.meta`` (lo que antes eran columnas propias):
 - ``meta["script"]``: guion locutado (str).
 - ``meta["sources"]``: fuentes con las que se escribió (list[dict] con id/text/url).
 - ``meta["guid"]``: identificador externo para deduplicar (p. ej. item RSS).
+- ``meta["loudness_lufs"]`` / ``meta["true_peak_db"]``: medida de loudness del audio
+  (float o None) para la ganancia en reproducción (``radio.station.gain``).
 """
 
 from __future__ import annotations
@@ -57,17 +59,28 @@ class SourceDoc:
 
 @dataclass(frozen=True)
 class LLMResult:
-    """Respuesta cruda de un proveedor LLM."""
+    """
+    Respuesta cruda de un proveedor LLM. ``model`` es el id que respondió y
+    ``cost_eur`` el coste estimado de la llamada (lo suma el productor en
+    ``producer_runs.cost_eur`` para la regla de gasto, §4.2); los fakes dejan 0.
+    """
     text: str
     input_tokens: int
     output_tokens: int
+    model: str = ""
+    cost_eur: float = 0.0
 
 
 @dataclass(frozen=True)
 class AudioInfo:
-    """Metadatos de un archivo de audio ya generado o importado."""
+    """
+    Metadatos de un archivo de audio ya generado o importado. ``cached`` es True si
+    un TTS lo ha servido desde su caché (``CachedTTS``) sin sintetizar ni facturar:
+    esos caracteres no cuentan en ``producer_runs.tts_chars``.
+    """
     path: Path
     duration_s: float
+    cached: bool = False
 
 
 # ── Segmento principal ────────────────────────────────────────────────────────

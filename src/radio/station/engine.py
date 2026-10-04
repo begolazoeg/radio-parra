@@ -69,6 +69,15 @@ registrado en ``play_log`` con kind ``emergency`` y ``segment_id`` NULL. Se rein
 programar a los ``emergency_retry_s`` segundos (y al acabar cada vuelta del bucle); en
 cuanto hay algo que emitir, se corta el bucle y suena.
 
+Normalización de volumen en reproducción
+----------------------------------------
+Cada archivo se encola con su ganancia (``backend.enqueue(path, gain_db=...)``),
+calculada con ``radio.station.gain`` a partir de ``meta.loudness_lufs`` y
+``meta.true_peak_db`` hacia ``station.loudness_lufs``. La música de Tiny Desk no se
+modifica en disco (términos de NPR): se iguala al sonar. Sin medida (palabra ya
+normalizada en ``post``, bucle de emergencia) o con ``audio.normalize: false`` → 0 dB.
+``stats.gain`` resume las ganancias aplicadas a archivos medidos.
+
 Watchdog
 --------
 El backend relanza el reproductor si muere (``restarts``). En cada ``tick()`` se
@@ -109,6 +118,7 @@ from radio.grid.scheduler import (
 from radio.music.library import AUDIO_EXTENSIONS
 from radio.providers.audio.base import QueueingAudioBackend
 from radio.providers.audio.events import Ended, EndReason, PlayerEvent, Started
+from radio.station.gain import GainPolicy, has_measurement, segment_gain_db
 from radio.station.queue import EMERGENCY_KIND, AirQueue, QueueItem
 
 logger = logging.getLogger(__name__)
@@ -143,6 +153,25 @@ class AiredItem:
 
 
 @dataclass
+class GainStats:
+    """Resumen de las ganancias aplicadas a archivos con medida de loudness (sin listas)."""
+    count: int = 0
+    min_db: float | None = None
+    max_db: float | None = None
+    total_db: float = 0.0
+
+    def add(self, gain_db: float) -> None:
+        self.count += 1
+        self.total_db += gain_db
+        self.min_db = gain_db if self.min_db is None else min(self.min_db, gain_db)
+        self.max_db = gain_db if self.max_db is None else max(self.max_db, gain_db)
+
+    @property
+    def mean_db(self) -> float | None:
+        return self.total_db / self.count if self.count else None
+
+
+@dataclass
 class EngineStats:
     """Contadores de la emisora desde que arrancó."""
     units_started: Counter[int] = field(default_factory=Counter)   # peldaño → unidades
@@ -153,6 +182,7 @@ class EngineStats:
     emergencies: int = 0         # vueltas del bucle de emergencia encoladas
     quarantined: int = 0         # segmentos puestos en cuarentena
     restarts: int = 0            # relanzamientos del reproductor vistos
+    gain: GainStats = field(default_factory=GainStats)  # ganancias de archivos medidos
 
 
 class StationEngine:
@@ -176,6 +206,7 @@ class StationEngine:
         auto_drain: bool = True,
         on_wake: Callable[[], None] | None = None,
         on_aired: Callable[[AiredItem], None] | None = None,
+        gain_policy: GainPolicy | None = None,
     ) -> None:
         self.db = db
         self.grid = grid
@@ -193,6 +224,8 @@ class StationEngine:
         self.auto_drain = auto_drain
         self.on_wake = on_wake
         self.on_aired = on_aired
+        # Normalización en reproducción (por defecto: −16 LUFS, −12..+6 dB, −1 dBTP)
+        self.gain_policy = gain_policy if gain_policy is not None else GainPolicy()
 
         self.queue = AirQueue()
         self.stats = EngineStats()
@@ -219,7 +252,8 @@ class StationEngine:
         **kwargs: Any,
     ) -> StationEngine:
         """
-        Motor con los ajustes de station.yaml (``playout``, ``interrupts``) y grid.yaml;
+        Motor con los ajustes de station.yaml (``playout``, ``interrupts``, ``audio``
+        y ``loudness_lufs``) y grid.yaml;
         ``kwargs`` completa o sustituye (``mode``, ``rng``, ``verify_files``...).
         """
         playout = config.station.playout
@@ -227,6 +261,7 @@ class StationEngine:
         kwargs.setdefault("cut_music", config.station.interrupts.cut_music)
         kwargs.setdefault("emergency_dir", resolve_emergency_dir(config))
         kwargs.setdefault("emergency_retry_s", playout.emergency_retry_s)
+        kwargs.setdefault("gain_policy", GainPolicy.from_config(config))
         return cls(db, config.grid, backend, clock, **kwargs)
 
     # ── Ciclo de vida ────────────────────────────────────────────────────────
@@ -332,10 +367,12 @@ class StationEngine:
             self.stats.units_started[RUNG_EMERGENCY] += 1
         elif item.segment is unit.segments[0]:
             self.stats.units_started[unit.rung] += 1
+        if has_measurement(item.segment):
+            self.stats.gain.add(item.gain_db)
         logger.info(
-            "En antena %s [%s] %s (%.0f s) — peldaño %s — %s",
+            "En antena %s [%s] %s (%.0f s, %+.1f dB) — peldaño %s — %s",
             event.at.astimezone(self.tz).strftime("%H:%M:%S"), item.kind, item.title,
-            item.duration_s, unit.rung if unit else RUNG_EMERGENCY,
+            item.duration_s, item.gain_db, unit.rung if unit else RUNG_EMERGENCY,
             unit.reason if unit else "bucle de emergencia",
         )
         # Lo que empieza deja de estar pendiente: se repone el lookahead
@@ -423,19 +460,23 @@ class StationEngine:
     def _push_unit(self, unit: PlayUnit) -> None:
         self._unit_no += 1
         self.pattern_pos = advance_pattern(self.pattern_pos, unit)
-        items = [
+        self._enqueue(self._unit_items(unit))
+
+    def _unit_items(self, unit: PlayUnit) -> list[QueueItem]:
+        """Elementos de cola de una unidad, cada uno con su ganancia de reproducción."""
+        return [
             QueueItem(path=seg.path, kind=seg.kind, duration_s=seg.duration_s,
-                      unit_no=self._unit_no, segment=seg, unit=unit)
+                      unit_no=self._unit_no, segment=seg, unit=unit,
+                      gain_db=segment_gain_db(seg, self.gain_policy))
             for seg in unit.segments
         ]
-        self._enqueue(items)
 
     def _enqueue(self, items: list[QueueItem]) -> None:
         # Primero el espejo y luego el backend: sus eventos pueden llegar dentro de enqueue
         for item in items:
             self.queue.push(item)
         for item in items:
-            self.backend.enqueue(item.path)
+            self.backend.enqueue(item.path, gain_db=item.gain_db)
 
     def _state(self, now: datetime, *, include_pending: bool) -> SchedulerState:
         """``play_log`` reciente (lo emitido y lo que suena) + lo planificado sin emitir."""
@@ -522,11 +563,7 @@ class StationEngine:
                 return
         self._drop_pending()
         self._unit_no += 1
-        self._enqueue([
-            QueueItem(path=seg.path, kind=seg.kind, duration_s=seg.duration_s,
-                      unit_no=self._unit_no, segment=seg, unit=unit)
-            for seg in unit.segments
-        ])
+        self._enqueue(self._unit_items(unit))
         self.stats.interrupts += 1
         logger.info("Interrupción: %s%s", unit.reason,
                     f" (se corta {cur.title})" if cut and cur is not None else "")
@@ -605,7 +642,7 @@ class StationEngine:
                            self.backend.queued(), len(self.queue.pending))
             self.backend.clear_pending()
             for item in self.queue.pending:
-                self.backend.enqueue(item.path)
+                self.backend.enqueue(item.path, gain_db=item.gain_db)
         self._refill(now)
 
     # ── Utilidades ───────────────────────────────────────────────────────────

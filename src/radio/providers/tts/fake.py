@@ -24,6 +24,8 @@ class FakeTTS:
     Genera silencio WAV de duración proporcional al número de caracteres.
     """
 
+    name = "fake"
+
     def __init__(self, chars_per_second: float = _CHARS_PER_SECOND) -> None:
         self.chars_per_second = chars_per_second
         self.calls: list[dict[str, Any]] = []

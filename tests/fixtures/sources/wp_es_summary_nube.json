@@ -1,0 +1,32 @@
+{
+  "_comment": "Respuesta sintética con la forma real de la API; 'Nube Ferrán' es una artista ficticia y ningún id ni texto corresponde a nada real.",
+  "type": "standard",
+  "title": "Nube Ferrán",
+  "displaytitle": "<span class=\"mw-page-title-main\">Nube Ferrán</span>",
+  "namespace": {
+    "id": 0,
+    "text": ""
+  },
+  "wikibase_item": "Q999000111",
+  "titles": {
+    "canonical": "Nube_Ferrán",
+    "normalized": "Nube Ferrán",
+    "display": "Nube Ferrán"
+  },
+  "pageid": 99900011,
+  "lang": "es",
+  "dir": "ltr",
+  "revision": "123456789",
+  "timestamp": "2026-08-01T12:00:00Z",
+  "description": "cantautora ficticia",
+  "content_urls": {
+    "desktop": {
+      "page": "https://es.wikipedia.org/wiki/Nube_Ferr%C3%A1n"
+    },
+    "mobile": {
+      "page": "https://es.m.wikipedia.org/wiki/Nube_Ferr%C3%A1n"
+    }
+  },
+  "extract": "Nube Ferrán (Villa Parral, 17 de mayo de 1991) es una cantautora ficticia estadounidense. Ha publicado tres álbumes de estudio; el segundo, Faro de Niebla, apareció en 2018.",
+  "extract_html": "<p><b>Nube Ferrán</b> es una cantautora ficticia.</p>"
+}

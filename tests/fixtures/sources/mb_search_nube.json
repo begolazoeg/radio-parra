@@ -1,0 +1,44 @@
+{
+  "_comment": "Respuesta sintética con la forma real de la API; 'Nube Ferrán' es una artista ficticia y ningún id ni texto corresponde a nada real.",
+  "created": "2026-09-24T10:00:00.000Z",
+  "count": 2,
+  "offset": 0,
+  "artists": [
+    {
+      "id": "5e1f0a3c-0000-4000-8000-00000000f001",
+      "type": "Person",
+      "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+      "score": 100,
+      "name": "Nube Ferrán",
+      "sort-name": "Ferrán, Nube",
+      "country": "US",
+      "area": {
+        "id": "489ce91b-6658-3307-9877-795b68554c98",
+        "type": "Country",
+        "name": "United States",
+        "sort-name": "United States"
+      },
+      "begin-area": {
+        "id": "00000000-0000-4000-8000-0000000a0001",
+        "type": "City",
+        "name": "Villa Parral",
+        "sort-name": "Villa Parral"
+      },
+      "disambiguation": "cantautora ficticia de pruebas",
+      "life-span": {
+        "begin": "1991-05-17",
+        "ended": null
+      }
+    },
+    {
+      "id": "5e1f0a3c-0000-4000-8000-00000000f003",
+      "type": "Group",
+      "score": 61,
+      "name": "Nube Ferrari Trío",
+      "sort-name": "Nube Ferrari Trío",
+      "life-span": {
+        "ended": null
+      }
+    }
+  ]
+}

@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from radio.core.config import RadioConfig
 from radio.producers.base import Producer
+from radio.producers.host_intro import HostIntroProducer
 from radio.producers.music_tinydesk import MusicTinyDeskProducer
 from radio.producers.time_signal import TimeSignalProducer
 
@@ -20,6 +21,7 @@ ProducerFactory = Callable[[RadioConfig], Producer]
 PRODUCERS: dict[str, ProducerFactory] = {
     TimeSignalProducer.name: TimeSignalProducer,
     MusicTinyDeskProducer.name: MusicTinyDeskProducer,
+    HostIntroProducer.name: HostIntroProducer,
 }
 
 

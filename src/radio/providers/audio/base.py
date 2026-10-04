@@ -7,6 +7,11 @@ Protocolos base para backends de reproducción de audio.
   eventos ``Started``/``Ended``, tamaño de la cola, archivo en curso, vaciado de lo
   pendiente (interrupciones), watchdog y cierre.
 
+Ganancia por archivo: ``QueueingAudioBackend.enqueue(path, gain_db=...)`` acepta una
+ganancia en dB que se aplica **solo a ese archivo** (normalización en reproducción,
+``radio.station.gain``); el archivo en disco no se toca. Es compatible con la interfaz
+mínima: ``enqueue(path)`` sigue valiendo (0 dB).
+
 Implementaciones: ``MpvIpcBackend`` (real), ``FakeEventBackend`` (simulación
 determinista con eventos) y ``NullAudioBackend`` (solo registra llamadas).
 """
@@ -42,12 +47,18 @@ class QueueingAudioBackend(AudioBackend, Protocol):
     Backend con cola propia y eventos de reproducción.
 
     Semántica común:
-    - ``enqueue(path)``: añade al final de la cola; si no suena nada, empieza ya.
+    - ``enqueue(path, gain_db=0.0)``: añade al final de la cola; si no suena nada,
+      empieza ya. ``gain_db`` se aplica solo a ese archivo (el siguiente vuelve a 0 dB
+      salvo que traiga la suya) y se conserva si el watchdog relanza el reproductor.
     - ``play(path)``: ``enqueue(path)`` + bloquear hasta que *ese* archivo termine
       (por fin, salto o error). Si hay cosas delante en la cola, suenan antes.
     - ``skip()``: corta el archivo en curso (``Ended(reason="skipped")``) y pasa al
       siguiente; sin nada en curso no hace nada.
     """
+
+    def enqueue(self, path: Path, *, gain_db: float = 0.0) -> None:
+        """Encola ``path`` con una ganancia propia (dB) que no afecta a otros archivos."""
+        ...
 
     @property
     def restarts(self) -> int:

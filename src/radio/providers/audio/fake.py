@@ -42,7 +42,9 @@ class FakeEventBackend:
     """
     Backend determinista con la misma API de eventos que ``MpvIpcBackend``.
 
-    - ``enqueue(path)``: al final de la cola; si no suena nada, empieza (``Started``).
+    - ``enqueue(path, gain_db=0.0)``: al final de la cola; si no suena nada, empieza
+      (``Started``). La ganancia se guarda con el archivo: ``current_gain_db()`` y
+      ``gains`` (ganancia de cada archivo que empezó a sonar, en orden).
     - ``finish(reason="eof")``: termina el archivo en curso y empieza el siguiente.
     - ``skip()``: ``finish("skipped")`` si hay algo sonando.
     - ``clear_pending()``: descarta los pendientes (sin eventos); el actual sigue.
@@ -50,7 +52,8 @@ class FakeEventBackend:
     - ``play(path)``: encola y termina (``eof``) todo hasta ese archivo, incluido.
     - ``crash()``: simula que el reproductor muere y el watchdog lo relanza: el archivo
       en curso termina con ``error``, ``restarts`` sube y sigue el siguiente pendiente.
-    - ``calls``: registro de llamadas (``play``/``enqueue``/``skip``) como ``NullAudioBackend``.
+    - ``calls``: registro de llamadas (``play``/``enqueue``/``skip``) como ``NullAudioBackend``
+      (``enqueue`` con su ``gain_db``).
 
     Los oyentes se llaman de forma síncrona, en el mismo hilo, en orden.
     """
@@ -68,19 +71,23 @@ class FakeEventBackend:
         self._listeners = ListenerSet()
         self._pending: deque[tuple[int, Path]] = deque()
         self._current: tuple[int, Path] | None = None
+        self._gain_of: dict[int, float] = {}   # token pendiente → ganancia (dB)
+        self._current_gain = 0.0
         self._current_since: datetime | None = None
         self._tokens = itertools.count()
         self._restarts = 0
         self._closed = False
         self.calls: list[dict[str, object]] = []
+        # (archivo, ganancia) de cada archivo que empieza a sonar, en orden
+        self.gains: list[tuple[Path, float]] = []
 
     # ── AudioBackend ─────────────────────────────────────────────────────────
 
-    def enqueue(self, path: Path) -> None:
-        self.calls.append({"action": "enqueue", "path": path})
+    def enqueue(self, path: Path, *, gain_db: float = 0.0) -> None:
+        self.calls.append({"action": "enqueue", "path": path, "gain_db": gain_db})
         if self._closed:
             return
-        self._add(path)
+        self._add(path, gain_db)
 
     def play(self, path: Path) -> None:
         self.calls.append({"action": "play", "path": path})
@@ -120,7 +127,8 @@ class FakeEventBackend:
         if self._current is not None:
             self.finish("error")
         elif self._pending:
-            _, path = self._pending.popleft()
+            token, path = self._pending.popleft()
+            self._gain_of.pop(token, None)
             events: list[PlayerEvent] = [Ended(path, self._clock.now(), "error")]
             events += self._start_next()
             self._emit(events)
@@ -143,6 +151,7 @@ class FakeEventBackend:
     def clear_pending(self) -> int:
         n = len(self._pending)
         self._pending.clear()
+        self._gain_of.clear()
         self.calls.append({"action": "clear_pending", "n": n})
         return n
 
@@ -156,6 +165,10 @@ class FakeEventBackend:
     def current(self) -> Path | None:
         return self._current[1] if self._current is not None else None
 
+    def current_gain_db(self) -> float | None:
+        """Ganancia del archivo en curso (``None`` si no suena nada)."""
+        return self._current_gain if self._current is not None else None
+
     def alive(self) -> bool:
         return not self._closed
 
@@ -168,12 +181,15 @@ class FakeEventBackend:
             (_, path), self._current = self._current, None
             self._emit([Ended(path, self._clock.now(), "skipped")])
         self._pending.clear()
+        self._gain_of.clear()
 
     # ── Internos ─────────────────────────────────────────────────────────────
 
-    def _add(self, path: Path) -> int:
+    def _add(self, path: Path, gain_db: float = 0.0) -> int:
         token = next(self._tokens)
         self._pending.append((token, path))
+        if gain_db:
+            self._gain_of[token] = gain_db
         if self._current is None:
             self._emit(self._start_next())
         return token
@@ -183,6 +199,8 @@ class FakeEventBackend:
             return []
         self._current = self._pending.popleft()
         self._current_since = self._clock.now()
+        self._current_gain = self._gain_of.pop(self._current[0], 0.0)
+        self.gains.append((self._current[1], self._current_gain))
         return [Started(self._current[1], self._current_since)]
 
     def _emit(self, events: list[PlayerEvent]) -> None:

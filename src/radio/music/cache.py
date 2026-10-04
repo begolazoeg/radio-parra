@@ -10,6 +10,11 @@ Orden de expulsión (LRU): por "última actividad" = la última emisión en
 tiempo sale primero y, entre lo nunca emitido, lo más antiguo; lo recién
 descargado es lo último en salir. Al expulsar, primero se marca ``retired`` (nunca
 queda una fila ``ready`` apuntando a un archivo borrado) y luego se borra el audio.
+
+Las intros vinculadas (``host_intro`` con ``parent_id`` = la canción, §14: caducidad
+"ligada a la música") se retiran con su canción: ``retire_linked`` las pasa a
+``retired`` y borra su audio. El scheduler ya no las emitiría (solo vincula intros
+a música emitible), pero así no ocupan disco ni stock.
 """
 
 from __future__ import annotations
@@ -26,12 +31,16 @@ logger = logging.getLogger(__name__)
 
 MB = 1024 * 1024
 
+# Kinds que viven pegados a una canción (``parent_id``) y se retiran con ella
+LINKED_KINDS: tuple[str, ...] = ("host_intro",)
+
 
 @dataclass
 class EvictionReport:
-    """Segmentos retirados y bytes liberados."""
+    """Segmentos retirados (canciones y sus intros vinculadas) y bytes liberados."""
     retired: list[str] = field(default_factory=list)
     freed_bytes: int = 0
+    linked_retired: list[str] = field(default_factory=list)
 
 
 def _size(seg: Segment) -> int:
@@ -39,6 +48,26 @@ def _size(seg: Segment) -> int:
         return seg.path.stat().st_size
     except OSError:
         return 0
+
+
+def retire_linked(db: DB, parent_id: str, *, kinds: Collection[str] = LINKED_KINDS) -> list[str]:
+    """
+    Retira los segmentos vinculados a ``parent_id`` que aún están ``ready`` (p. ej.
+    las intros de una canción que sale de la caché) y borra su audio. Los que están
+    en otro estado (``quarantined`` para revisión, ya ``retired``...) no se tocan.
+    Devuelve los ids retirados.
+    """
+    retired: list[str] = []
+    for kind in kinds:
+        for child in db.list_segments(kind=kind, status="ready"):
+            if child.parent_id != parent_id:
+                continue
+            db.update_segment_status(child.id, "retired")
+            child.path.unlink(missing_ok=True)
+            retired.append(child.id)
+            logger.info("Retirada %s %s: su canción %s ha salido del stock",
+                        kind, child.id, parent_id)
+    return retired
 
 
 def last_activity(db: DB, segments: Collection[Segment]) -> dict[str, datetime]:
@@ -83,6 +112,7 @@ def evict_music_cache(
             continue
         db.update_segment_status(seg.id, "retired")
         seg.path.unlink(missing_ok=True)
+        report.linked_retired.extend(retire_linked(db, seg.id))
         count -= 1
         total -= sizes[seg.id]
         report.retired.append(seg.id)

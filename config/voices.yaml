@@ -1,12 +1,23 @@
 # Voces disponibles para TTS (§5 de ARCHITECTURE.md)
 # Regla de carga: toda voz necesita consent: true y una consent_note no vacía.
-# La voz del locutor (sintética genérica o clonada) es la decisión abierta #4:
-# de momento solo hay una voz genérica provisional.
+# Decisión #4 (2026-09-24): el locutor usa una voz sintética genérica.
+#
+# provider: "piper" (alias "local"), "cloud" (alias "elevenlabs") o "fake".
+# Con Piper, provider_voice_id es el nombre del modelo en
+# station.yaml → providers.tts.extra.models_dir (data/models/piper/<id>.onnx y
+# <id>.onnx.json). La radio nunca descarga modelos: se instalan a mano.
+#
+# ⚠ es_ES-davefx-medium es una SUGERENCIA de voz española de Piper. Antes de
+#   usarla, comprueba la licencia del modelo (y del dataset con el que se entrenó)
+#   en su ficha (MODEL_CARD) y que no imita a una persona real identificable.
+#   Si no encaja, cambia el id por otra voz es_ES y revisa lo mismo.
 voices:
   - id: locutor_principal
     role: host
-    provider: cloud
-    provider_voice_id: "<pendiente>"
+    provider: piper
+    provider_voice_id: "es_ES-davefx-medium"
     language: es
     consent: true
-    consent_note: "Voz sintética genérica del proveedor"
+    consent_note: >-
+      Voz sintética genérica (modelo de voz de Piper, no una voz clonada de
+      nadie); verificar la licencia del modelo antes de emitir

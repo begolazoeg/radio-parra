@@ -97,10 +97,14 @@ Se construyeron antes de la Fase 3 porque la emisora los necesitaba para no dive
   que prevé usar las descripciones de los episodios como fuente (*grounding*) del LLM
   del locutor. Cortar un concierto para dar la señal horaria es dejar de reproducirlo,
   no modificar el archivo; aun así es configurable (`interrupts.cut_music`).
+  → *Revisado (2026-09-24), ver [ADR 0003](0003-fase-2-locutor.md):* la descripción del
+  episodio **nunca** llega al LLM ni se guarda; el locutor usa solo fuentes abiertas
+  (MusicBrainz CC0 + Wikipedia CC BY-SA) y el título del episodio como identificador.
 - **#1 (nombre) y #2 (idioma): provisionales** en `station.yaml` (`name: "Radio Parra"`,
   `language: "es"`). La señal horaria usa `name`.
 - **#4 (voz del locutor): abierta.** `voices.yaml` solo tiene una voz sintética genérica
-  provisional (`provider_voice_id: "<pendiente>"`).
+  provisional (`provider_voice_id: "<pendiente>"`). → *Resuelta después (ADR 0003):*
+  voz sintética genérica de Piper (`locutor_principal`); #3: TTS local Piper.
 - #3, #5, #6, #7 y #9 siguen abiertas y no afectan a la Fase 1.
 
 ## Otras decisiones y desviaciones documentadas

@@ -15,9 +15,14 @@ Producción simulada
 -------------------
 La emisora no produce (invariante 2), así que la simulación modela aparte el timer de
 ``deploy/radio-produce.timer``: cada ``PRODUCE_EVERY`` de tiempo simulado se ejecuta
-``producers.runner.produce`` (lo mismo que ``radio produce --all``) con ``FakeLLM`` y
-``FakeTTS`` y los productores de ``SIM_PRODUCERS`` (señal horaria). La música no se
-descarga: es stock sintético (``--catalog``):
+``producers.runner.produce`` (lo mismo que ``radio produce --all``) con los productores
+de ``SIM_PRODUCERS``: la señal horaria y el locutor (``host_intro``, Fase 2) con el
+pipeline real (gather → write → grounding → tts → register) pero con dobles: fuentes
+sintéticas y un ``FakeLLM`` que responde pegado a ellas
+(``radio.producers.host_intro_fake``), y un TTS falso que declara una duración
+proporcional al texto sin escribir audio de verdad (``SimTTS``). Así aparecen las
+unidades vinculadas ``[host_intro, music]`` y cuentan para el presupuesto de charla.
+La música no se descarga: es stock sintético (``--catalog``):
 
 - ``default``: 250 canciones de 40 artistas, 150–600 s, y 3 jingles;
 - ``tinydesk``: 40 conciertos de artistas distintos, 900–1800 s, como el feed de Tiny
@@ -40,8 +45,8 @@ informe no incluye ids ni rutas; misma semilla → informe idéntico.
 Invariantes duros (``SimReport.failures``): sin silencio, sin artista repetido en
 canciones consecutivas, al menos ``horas - 1`` señales horarias (todas dentro de su
 ``max_late_seconds``), la charla nunca por encima de ``talk_budget.max_ratio`` en
-ninguna ventana móvil, nunca ficción justo después de factual, ningún peldaño 5 y
-ningún producer con error.
+ninguna ventana móvil, nunca ficción justo después de factual, ninguna intro sin su
+canción justo detrás, ningún peldaño 5 y ningún producer con error.
 """
 
 from __future__ import annotations
@@ -58,15 +63,16 @@ from zoneinfo import ZoneInfo
 
 from radio.core.clock import FakeClock
 from radio.core.config import GridConfig, ProducersConfig, ProducerSettings, RadioConfig
-from radio.core.models import Segment
+from radio.core.models import AudioInfo, Segment, Voice
 from radio.core.store import DB
 from radio.grid.budget import is_talk
 from radio.grid.rules import resolve_mode
 from radio.grid.scheduler import ARTIST_PREFIX, RUNG_EMERGENCY, SEPARATOR_KINDS
 from radio.producers.base import ProducerContext
+from radio.producers.host_intro import HostIntroProducer
+from radio.producers.host_intro_fake import fake_intro_llm, fake_sources
 from radio.producers.runner import produce
 from radio.providers.audio.fake import FakeEventBackend
-from radio.providers.llm.fake import FakeLLM
 from radio.providers.tts.fake import FakeTTS
 from radio.station.engine import AiredItem, StationEngine, audio_duration
 
@@ -108,7 +114,19 @@ REPORT_KINDS: tuple[str, ...] = ("music", "host_intro", "jingle", "time_signal")
 # Productores de la simulación (no se toca producers.yaml: music_tinydesk necesita red)
 SIM_PRODUCERS: dict[str, ProducerSettings] = {
     "time_signal": ProducerSettings(active=True, target_stock=2, cron="*/30 * * * *"),
+    "host_intro": ProducerSettings(active=True, target_stock=10, cron="15 */2 * * *"),
 }
+
+
+class SimTTS(FakeTTS):
+    """
+    TTS de la simulación: misma duración que ``FakeTTS`` (proporcional al texto) pero
+    escribe un WAV mínimo, para no generar cientos de MB de silencio en 48 h.
+    """
+
+    def synthesize(self, text: str, voice: Voice, out_path: Path) -> AudioInfo:
+        info = super().synthesize(text[:1], voice, out_path)
+        return AudioInfo(path=info.path, duration_s=max(0.1, len(text) / self.chars_per_second))
 
 
 # ── Informe ───────────────────────────────────────────────────────────────────
@@ -150,6 +168,7 @@ class SimReport:
     end: str
     segments_aired: int
     units_aired: int
+    linked_units: int                  # unidades [host_intro, music] emitidas
     airtime_s: dict[str, float]
     airtime_pct: dict[str, float]
     music_share: float
@@ -162,10 +181,13 @@ class SimReport:
     music_cuts: int                    # canciones cortadas para dar paso a una interrupción
     back_to_back_artist: int
     fiction_after_factual: int
+    orphan_intros: int                 # intros emitidas sin su canción justo detrás
     rung_histogram: dict[str, int]     # peldaño de la escalera (§8) → unidades
     dead_air_s: float
     producer_runs: int
     producer_errors: int
+    # Normalización en reproducción: archivos medidos y ganancia aplicada (dB)
+    gain_db: dict[str, float | int | None] = field(default_factory=dict)
     decisions_sample: list[Decision] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     timeline: list[TimelineEntry] = field(default_factory=list)
@@ -188,12 +210,20 @@ class SimReport:
         header = "DD HH:MM:SS  P  kind          durac.    título"
         return "\n".join([header, *(t.to_text() for t in self.timeline)])
 
+    def _gain_text(self) -> str:
+        g = self.gain_db
+        if not g.get("measured"):
+            return "Ganancia en reproducción: ningún archivo con medida de loudness"
+        return (f"Ganancia en reproducción ({g['measured']} archivos medidos): "
+                f"mín {g['min']:+.1f} dB, máx {g['max']:+.1f} dB, media {g['mean']:+.1f} dB")
+
     def to_text(self, *, timeline: bool = False) -> str:
         lines = [
             f"Simulación Radio Parra — {self.hours:g} h, semilla {self.seed}, modo {self.mode}, "
             f"catálogo {self.catalog}",
             f"  Desde {self.start} hasta {self.end}",
-            f"  Unidades emitidas: {self.units_aired} ({self.segments_aired} segmentos)",
+            f"  Unidades emitidas: {self.units_aired} ({self.segments_aired} segmentos; "
+            f"{self.linked_units} con intro del locutor)",
             "",
         ]
         if timeline:
@@ -213,10 +243,12 @@ class SimReport:
             f"(canciones cortadas: {self.music_cuts})",
             f"Mismo artista seguido: {self.back_to_back_artist}",
             f"Ficción justo después de factual: {self.fiction_after_factual}",
+            f"Intros sin su canción detrás: {self.orphan_intros}",
             "Escalera de degradación (peldaño: unidades): "
             + ", ".join(f"{k}: {v}" for k, v in self.rung_histogram.items()),
             f"Silencio: {self.dead_air_s:.0f} s",
             f"Producers: {self.producer_runs} ejecuciones, {self.producer_errors} con error",
+            self._gain_text(),
             "",
             "Muestra de decisiones del scheduler:",
         ]
@@ -265,7 +297,9 @@ def build_catalog(
                 # created_at distinto por pista: orden estable
                 created_at=created_at + timedelta(microseconds=order),
                 producer="sim",
-                meta={"title": title, "tags": [f"{ARTIST_PREFIX}{artist}", "source:tiny_desk"]},
+                meta={"title": title, "artist": artist,
+                      "tags": [f"{ARTIST_PREFIX}{artist}", "source:tiny_desk"],
+                      **_sim_loudness(seg_id)},
             )
         )
     for i in range(N_JINGLES):
@@ -281,6 +315,17 @@ def build_catalog(
                 meta={"title": f"Jingle {i + 1}"},
             )
         )
+
+
+def _sim_loudness(seg_id: str) -> dict[str, float]:
+    """
+    Medida de loudness sintética (como la que guarda ``music_tinydesk``). Usa su propio
+    generador por pista para no alterar la secuencia del catálogo ni la simulación.
+    """
+    rng = random.Random(f"loudness:{seg_id}")
+    lufs = rng.uniform(-24.0, -12.0)
+    return {"loudness_lufs": round(lufs, 2),
+            "true_peak_db": round(min(0.0, lufs + rng.uniform(9.0, 17.0)), 2)}
 
 
 def talk_kinds(grid: GridConfig) -> list[str]:
@@ -443,6 +488,21 @@ def _fiction_after_factual(db: DB, aired: Sequence[_Aired]) -> int:
     return count
 
 
+def _linked_units(db: DB, aired: Sequence[_Aired]) -> tuple[int, int]:
+    """(unidades ``[host_intro, music]``, intros sin su canción justo detrás)."""
+    linked = orphans = 0
+    for n, item in enumerate(aired):
+        if item.kind != "host_intro":
+            continue
+        intro = db.get_segment(item.segment_id) if item.segment_id else None
+        nxt = aired[n + 1] if n + 1 < len(aired) else None
+        if intro is not None and nxt is not None and nxt.segment_id == intro.parent_id:
+            linked += 1
+        elif nxt is not None:           # la última puede quedar cortada por el fin
+            orphans += 1
+    return linked, orphans
+
+
 def _signal_delay_s(start: datetime, tz: ZoneInfo) -> float:
     """Segundos desde la hora en punto (local) hasta ``start``."""
     local = start.astimezone(tz)
@@ -453,8 +513,15 @@ def _signal_delay_s(start: datetime, tz: ZoneInfo) -> float:
 # ── Simulación ────────────────────────────────────────────────────────────────
 
 def sim_config(config: RadioConfig) -> RadioConfig:
-    """Copia de la configuración con los productores de la simulación."""
-    return config.model_copy(update={"producers": ProducersConfig(producers=dict(SIM_PRODUCERS))})
+    """
+    Copia de la configuración con los productores de la simulación (los parámetros de
+    ``host_intro`` se toman de producers.yaml si están).
+    """
+    producers = {k: v.model_copy(deep=True) for k, v in SIM_PRODUCERS.items()}
+    real = config.producers.get("host_intro")
+    if real is not None:
+        producers["host_intro"].params = dict(real.params)
+    return config.model_copy(update={"producers": ProducersConfig(producers=producers)})
 
 
 def run_simulation(
@@ -498,18 +565,22 @@ def run_simulation(
     try:
         with tempfile.TemporaryDirectory(prefix="radio-sim-") as tmp:
             ctx = ProducerContext(
-                db=db, clock=clock, llm=FakeLLM(), tts=FakeTTS(), config=config,
+                db=db, clock=clock, llm=fake_intro_llm(), tts=SimTTS(), config=config,
                 data_dir=Path(tmp), prompts_dir=prompts_dir,
             )
+            sim_producers = {
+                "host_intro": HostIntroProducer(config, source_gatherer=fake_sources),
+            }
             backend = FakeEventBackend(clock, duration_of=duration_of, advance=clock.advance)
             engine = StationEngine.from_config(
                 config, db, backend, clock, mode=mode, rng=random.Random(seed),
                 verify_files=False, on_aired=aired.append,
             )
-            produce(ctx)                              # stock inicial (el timer ya corrió)
+            produce(ctx, producers=sim_producers)     # stock inicial (el timer ya corrió)
             engine.start()
-            dead_air = drive(engine, backend, clock, end,
-                             jobs=[Job(PRODUCE_EVERY, lambda: produce(ctx))])
+            dead_air = drive(engine, backend, clock, end, jobs=[
+                Job(PRODUCE_EVERY, lambda: produce(ctx, producers=sim_producers)),
+            ])
             engine.stop()
             backend.close()
         return _build_report(
@@ -555,6 +626,7 @@ def _build_report(
     expected = max(0, int(hours) - 1) if signal_rules else 0
     back_to_back = _back_to_back_artists(db, aired)
     fiction_after = _fiction_after_factual(db, aired)
+    linked, orphans = _linked_units(db, aired)
     window = timedelta(minutes=grid.talk_budget.window_minutes)
     max_ratio = _max_rolling_talk_ratio(aired, start, window)
     runs = db.list_producer_runs()
@@ -580,6 +652,8 @@ def _build_report(
         )
     if fiction_after > 0:
         failures.append(f"ficción justo después de factual: {fiction_after}")
+    if orphans > 0:
+        failures.append(f"intros emitidas sin su canción detrás: {orphans}")
     if errors > 0:
         failures.append(f"producers con error: {errors}")
 
@@ -612,6 +686,7 @@ def _build_report(
         end=end.isoformat(),
         segments_aired=len(aired),
         units_aired=sum(n for r, n in rungs.items() if r != RUNG_EMERGENCY),
+        linked_units=linked,
         airtime_s={k: round(v, 2) for k, v in airtime.items()},
         airtime_pct=airtime_pct,
         music_share=round(airtime["music"] / total, 4),
@@ -624,10 +699,18 @@ def _build_report(
         music_cuts=engine.stats.music_cuts,
         back_to_back_artist=back_to_back,
         fiction_after_factual=fiction_after,
+        orphan_intros=orphans,
         rung_histogram={str(r): rungs.get(r, 0) for r in range(1, RUNG_EMERGENCY + 1)},
         dead_air_s=round(dead_air, 3),
         producer_runs=len(runs),
         producer_errors=errors,
+        gain_db={
+            "measured": engine.stats.gain.count,
+            "min": engine.stats.gain.min_db,
+            "max": engine.stats.gain.max_db,
+            "mean": (None if engine.stats.gain.mean_db is None
+                     else round(engine.stats.gain.mean_db, 2)),
+        },
         decisions_sample=sample,
         failures=failures,
         timeline=timeline,
