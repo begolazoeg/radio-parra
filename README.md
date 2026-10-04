@@ -130,7 +130,7 @@ uv run radio station                        # emisora real (mpv); Ctrl+C para pa
 
 | Criterio | Estado | Cómo se comprueba |
 |---|---|---|
-| En el portátil se enchufa y suena música en bucle | Hecho (falta probarlo con mpv real y el feed real a mano) | `radio produce music_tinydesk` + `radio station --mode tinydesk`; `test_fase1_acceptance.py` (48 h de solo música en modo `tinydesk`, emisora real contra un mpv falso por socket unix, `radio station` de extremo a extremo con SIGTERM) |
+| En el portátil se enchufa y suena música en bucle | Hecho; verificado a mano (2026-10-04, portátil Windows) con `radio produce music_tinydesk` + `radio station --mode tinydesk` y mpv real: suena la intro del locutor y encadena la canción, ganancia por archivo aplicada (`-1.1 dB`/`+0.0 dB`), `play_log` correcto. El cierre limpio con Ctrl+C real queda por confirmar en una terminal interactiva (no probable desde la herramienta que lo verificó) | `radio produce music_tinydesk` + `radio station --mode tinydesk`; `test_fase1_acceptance.py` (48 h de solo música en modo `tinydesk`, emisora real contra un mpv falso, `radio station` de extremo a extremo con SIGTERM) |
 | Cortando la red sigue sonando | Hecho | `test_fase1_acceptance.py`: 12 h de emisión con conexiones AF_INET/AF_INET6 y `httpx` bloqueados; importar `radio.station` no carga `httpx`, `feedparser`, productores ni LLM/TTS |
 | `simulate` produce una línea de tiempo de 24 h | Hecho | `radio simulate --hours 24 --seed 1 --timeline`; tests de la línea de tiempo continua de 24 h |
 | Productor `music_tinydesk` con dedup por `guid` y tope de caché | Hecho | `test_music_tinydesk.py` (fixture del feed, sin red) |
@@ -177,14 +177,23 @@ concierto, **pegada a fuentes** y vinculada a su canción (`parent_id`, unidad
 |---|---|---|
 | Test que rechaza un dato ausente de las fuentes | Hecho | `test_grounding.py::test_grounding_rejects_fact_absent_from_sources` (§9) y `test_fase2_acceptance.py::test_a_*` (el productor reintenta y cae a la versión sin dato) |
 | El 100 % de las intros con dato tienen `claims` trazables | Hecho | `test_fase2_acceptance.py::test_b_*` (40 intros con un LLM que a veces responde mal) y `radio audit host_intro` sobre la BD |
-| `radio preview host_intro` funciona con y sin fakes | Hecho (falta probarlo a mano con Claude y Piper reales) | `test_fase2_acceptance.py::test_c_*`: `--fake` de punta a punta; sin `--fake`, SDK de Anthropic sobre transporte simulado, `piper` y `mpv` falsos y fuentes con `MockTransport` |
+| `radio preview host_intro` funciona con y sin fakes | Hecho; verificado a mano (2026-10-04) con Claude Sonnet 5 y Piper reales sobre 10 artistas del feed real: 7/10 con datos, 2/10 sin datos, 0/10 en cuarentena; coste total 0,0721 € en 12 llamadas, verificado contra la tabla de precios oficial de Anthropic | `test_fase2_acceptance.py::test_c_*`: `--fake` de punta a punta; sin `--fake`, SDK de Anthropic sobre transporte simulado, `piper` y `mpv` falsos y fuentes con `MockTransport` |
 | La descripción de NPR nunca llega al LLM (decisión de la dueña) | Hecho | `test_fase2_acceptance.py::test_d_*` |
 
 `radio simulate` ejecuta `host_intro` con dobles (fuentes sintéticas, LLM pegado a
 ellas y TTS falso) e informa de las unidades con intro; ninguna intro puede sonar sin
-su canción detrás. Pendiente de verificar con proveedores y hardware reales: ver ADR
-0003 (licencia de la voz, coste y comportamiento reales de Claude, fuentes con
-artistas reales, velocidad de Piper en la Pi, ganancia por archivo en mpv).
+su canción detrás.
+
+**Pendiente de verificar (actualizado 2026-10-04):**
+
+- ✅ Licencia de la voz Piper (`es_ES-davefx-medium`): revisada, MIT + CC0; decisión
+  de la dueña: usarla igual (ver ADR 0003 y abajo).
+- ✅ Coste y comportamiento reales de Claude Sonnet 5: confirmados a mano.
+- ✅ Fuentes reales de MusicBrainz/Wikipedia con artistas del feed: confirmadas a mano.
+- ✅ Ganancia por archivo en mpv real: confirmada a mano (portátil Windows, mpv 0.41).
+- ⬜ Velocidad de Piper en la Raspberry Pi: sin probar (solo portátil hasta ahora;
+  decisión abierta #5).
+- ⬜ Ctrl+C limpio en una terminal interactiva real (ver tabla de Fase 1 arriba).
 
 ## Producción de stock (`radio produce`)
 

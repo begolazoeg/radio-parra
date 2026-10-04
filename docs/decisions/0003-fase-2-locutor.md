@@ -159,13 +159,30 @@ Provocan rechazo, nunca aceptación falsa; la escalera los absorbe:
 
 - **Licencia del modelo de voz de Piper** (`es_ES-davefx-medium` u otro) y que no
   imita a una persona real identificable; instalarlo a mano en `data/models/piper/`.
+  → *Verificado (2026-10-04):* MIT (repo `rhasspy/piper-voices`) + CC0 (dataset).
+  No es una voz sintética anónima: el dataset (`OHF-Voice/voice-datasets/es_ES/dave/`)
+  es la voz de una persona real identificada por su apodo ("davefx"/"Dave") que la
+  donó explícitamente bajo CC0 para construir voces TTS. Decisión de la dueña: usarla
+  igual, dado que el consentimiento y la licencia están claros.
 - Una intro real con Claude Sonnet 5 (`radio preview host_intro`): que el esquema JSON
   y el pensamiento adaptativo se comportan como en los tests con dobles, el coste
   real frente a la tabla de precios (**verificar precios**), y la proporción de
   intros con dato / sin dato / cuarentena con artistas reales.
+  → *Verificado (2026-10-04):* esquema y pensamiento adaptativo se comportan como en
+  los tests. Precios de `claude-sonnet-5` confirmados contra la página oficial de
+  Anthropic ($2/$10 por MTok, caché $0.20/$2.50): coinciden con `PRICES_USD_PER_MTOK`.
+  10 artistas reales del feed: 7/10 con datos, 2/10 sin datos, 0/10 en cuarentena;
+  coste total 0,0721 € en 12 llamadas (incluye reintentos).
 - Respuestas reales de MusicBrainz/Wikipedia para artistas del feed (nombres con
   tildes, grupos con "The", desambiguaciones) y el ritmo del límite de tasa.
+  → *Verificado (2026-10-04):* sin problemas con los 10 artistas probados (tildes,
+  nombres con "The", etc.); el límite de tasa de MusicBrainz no se disparó.
 - Piper en la Pi: tiempo de síntesis de ~20 s de audio (si es lento, producir en el
   portátil y sincronizar, decisión #5) y calidad de la voz en español.
+  → *Sigue sin probar*: solo se ha verificado en portátil (Windows), no en Raspberry
+  Pi. Decisión #5 sigue abierta.
 - Normalización en reproducción con mpv real: que la ganancia por archivo se aplica y
   no se arrastra al siguiente, y el volumen percibido entre intro y concierto.
+  → *Verificado (2026-10-04, portátil Windows, mpv 0.41):* la ganancia por archivo se
+  aplica (ej. `-1.1 dB` en un tema con pico alto, `+0.0 dB` en otro) y no se arrastra
+  al siguiente archivo.
