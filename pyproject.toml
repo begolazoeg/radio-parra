@@ -20,6 +20,8 @@ dependencies = [
     "python-ulid>=2",
     "pyyaml>=6",
     "anthropic>=1.8.0",
+    # Windows no trae la base de datos IANA que usa zoneinfo (sí la tienen Linux/macOS).
+    "tzdata>=2026.1; sys_platform == 'win32'",
 ]
 
 [project.scripts]

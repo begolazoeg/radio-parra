@@ -349,9 +349,11 @@ class DB:
 
     def find_by_path(self, path: Path | str) -> Segment | None:
         """Segmento cuyo audio está en ``path`` (comparación exacta), o None."""
+        # add_segment guarda str(Path(...)) (separador nativo del SO); normalizar
+        # igual aquí para que una cadena con "/" encuentre la fila en Windows.
         row = self._conn.execute(
             "SELECT * FROM segments WHERE path = ?" + _SEGMENT_ORDER + " LIMIT 1",
-            (str(path),),
+            (str(Path(path)),),
         ).fetchone()
         return _row_to_segment(row) if row else None
 

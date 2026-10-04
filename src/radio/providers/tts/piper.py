@@ -42,7 +42,10 @@ def resolve_model(provider_voice_id: str, models_dir: Path) -> Path:
     """Ruta del ``.onnx`` para ``provider_voice_id`` (ver docstring del módulo)."""
     name = provider_voice_id.strip()
     path = Path(name)
-    if not path.is_absolute():
+    # Path("/x").is_absolute() es False en Windows (sin letra de unidad): una
+    # ruta explícita con "/" o "\" inicial se respeta igual, no se junta con
+    # models_dir.
+    if not path.is_absolute() and not name.startswith(("/", "\\")):
         path = models_dir / name
     if path.suffix != ".onnx":
         path = path.with_name(path.name + ".onnx")

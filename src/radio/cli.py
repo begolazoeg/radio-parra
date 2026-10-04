@@ -15,6 +15,12 @@ import typer
 if TYPE_CHECKING:
     from radio.core.config import RadioConfig
 
+# En Windows la consola suele usar cp1252, que no sabe codificar "—" ni "→" y
+# hace que cualquier typer.echo con esos caracteres reviente con UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 app = typer.Typer(help="Radio Parra — radio casera con locutor IA")
 
 

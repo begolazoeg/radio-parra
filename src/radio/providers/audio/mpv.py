@@ -97,6 +97,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -106,7 +107,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from radio.core.clock import Clock, SystemClock
 from radio.providers.audio.events import (
@@ -171,6 +172,148 @@ def gain_filter(gain_db: float, base_af: str | None = None) -> str:
     """Valor de la opción ``af`` para una ganancia (con el ``--af`` global delante)."""
     volume = f"lavfi-volume=volume={gain_db:.2f}dB"
     return f"[{base_af},{volume}]" if base_af else f"[{volume}]"
+
+
+class _IpcSocket(Protocol):
+    """
+    Subconjunto de ``socket.socket`` que usa este módulo: lo implementan tanto el
+    socket Unix real (Linux/Pi/macOS) como ``_WinPipeSocket`` (Windows, ver abajo).
+    """
+
+    def sendall(self, data: bytes) -> None: ...
+    def recv(self, nbytes: int, flags: int = 0) -> bytes: ...
+    def settimeout(self, value: float | None) -> None: ...
+    def shutdown(self, how: int) -> None: ...
+    def close(self) -> None: ...
+    def makefile(self, mode: Literal["rb"]) -> Any: ...
+
+
+if sys.platform == "win32":
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.PeekNamedPipe.argtypes = [
+        wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _kernel32.PeekNamedPipe.restype = wintypes.BOOL
+
+    def _peek_named_pipe(handle: int, nbytes: int) -> bytes | None:
+        """
+        Hasta ``nbytes`` del *pipe* sin consumirlos (``None`` si está roto/cerrado).
+
+        A diferencia de ``socket.recv(n, MSG_PEEK)``, nunca bloquea: con el *pipe*
+        vacío devuelve 0 bytes al instante, así que quien llama sondea en bucle.
+        """
+        buf = ctypes.create_string_buffer(nbytes) if nbytes else None
+        bytes_read = wintypes.DWORD(0)
+        ok = _kernel32.PeekNamedPipe(
+            handle, buf, nbytes, ctypes.byref(bytes_read), None, None
+        )
+        if not ok:
+            return None
+        return buf.raw[: bytes_read.value] if buf else b""
+
+
+class _WinPipeSocket:
+    """
+    Sustituto de ``socket.socket`` para el *named pipe* de mpv en Windows.
+
+    mpv expone ``--input-ipc-server=NAME`` en Windows como un *named pipe*
+    (``\\\\.\\pipe\\NAME``), no como un socket Unix, y el CPython oficial de Windows
+    no define ``socket.AF_UNIX`` (aunque el sistema sí lo soporta desde hace años).
+
+    Un objeto de archivo normal (``open(path, "r+b")``) basta para leer y escribir,
+    pero no tiene ``settimeout`` ni ``MSG_PEEK``, y un primer intento con un hilo de
+    fondo bloqueado en ``read()`` resultó en que ``close()`` se queda colgado:
+    cerrar un *handle* de Windows mientras otro hilo tiene una lectura síncrona
+    pendiente sobre él no la cancela (a diferencia de un socket Unix). En vez de
+    eso, ``PeekNamedPipe`` (ctypes; no hace falta ``pywin32``) consulta sin
+    bloquear cuántos bytes hay esperando, así que ``recv``/``MSG_PEEK`` y la
+    lectura línea a línea sondean con una espera corta entre intentos — igual que
+    ``_probe_version`` ya hace con ``MSG_PEEK`` real en la rama POSIX. Nunca hay
+    una lectura bloqueante que ``close()`` necesite interrumpir.
+    """
+
+    _POLL_S = 0.01
+
+    def __init__(self, path: str) -> None:
+        self._fh = open(path, "r+b", buffering=0)  # noqa: SIM115 (vive hasta close())
+        self._handle = msvcrt.get_osfhandle(self._fh.fileno())
+        self._closed = False
+        self._timeout: float | None = None
+
+    def sendall(self, data: bytes) -> None:
+        self._fh.write(data)
+
+    def recv(self, nbytes: int, flags: int = 0) -> bytes:
+        deadline = None if self._timeout is None else time.monotonic() + self._timeout
+        while True:
+            peeked = _peek_named_pipe(self._handle, nbytes)
+            if peeked is None:
+                return b""  # pipe roto: equivalente a EOF
+            if peeked:
+                break
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeoutError("tiempo agotado leyendo el pipe de mpv")
+            time.sleep(self._POLL_S)
+        if flags & socket.MSG_PEEK:
+            return peeked
+        return self._fh.read(len(peeked))  # ya confirmado disponible: no bloquea
+
+    def settimeout(self, value: float | None) -> None:
+        self._timeout = value
+
+    def shutdown(self, how: int) -> None:
+        pass  # un solo canal de lectura/escritura: close() lo cierra entero
+
+    def close(self) -> None:
+        self._closed = True
+        try:
+            self._fh.close()
+        except OSError:
+            pass
+
+    def makefile(self, mode: str) -> _WinPipeLineReader:
+        return _WinPipeLineReader(self)
+
+
+class _WinPipeLineReader:
+    """Líneas del *pipe* de ``_WinPipeSocket`` (equivalente a ``sock.makefile("rb")``)."""
+
+    _PEEK_BYTES = 65536
+    _POLL_S = _WinPipeSocket._POLL_S
+
+    def __init__(self, owner: _WinPipeSocket) -> None:
+        self._owner = owner
+
+    def __enter__(self) -> _WinPipeLineReader:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass  # el pipe lo cierra el backend, no este envoltorio
+
+    def __iter__(self) -> _WinPipeLineReader:
+        return self
+
+    def __next__(self) -> bytes:
+        owner = self._owner
+        while True:
+            if owner._closed:
+                raise StopIteration
+            peeked = _peek_named_pipe(owner._handle, self._PEEK_BYTES)
+            if peeked is None:
+                raise StopIteration  # pipe roto: como agotar sock.makefile("rb")
+            idx = peeked.find(b"\n")
+            if idx >= 0:
+                try:
+                    return owner._fh.read(idx + 1)  # ya confirmado: no bloquea
+                except OSError:
+                    raise StopIteration from None  # cerrado justo entre medias
+            time.sleep(self._POLL_S)
 
 
 class MpvError(RuntimeError):
@@ -247,7 +390,7 @@ class MpvIpcBackend:
         self._current: _Item | None = None
         self._finished_in_playlist = 0  # entradas terminadas que siguen en la playlist
         self._proc: subprocess.Popen[bytes] | None = None
-        self._sock: socket.socket | None = None
+        self._sock: _IpcSocket | None = None
         self._reader: threading.Thread | None = None
         self._supervisor: threading.Thread | None = None
         self._generation = 0
@@ -489,9 +632,29 @@ class MpvIpcBackend:
 
     # ── Internos: proceso y socket ───────────────────────────────────────────
 
+    def _connect_once(self) -> _IpcSocket:
+        """
+        Un intento de conexión al IPC de mpv; ``OSError`` si todavía no está listo.
+
+        En Windows mpv expone ``--input-ipc-server=NAME`` como *named pipe*
+        (``\\\\.\\pipe\\NAME``), no como socket Unix (el CPython de Windows no
+        define ``socket.AF_UNIX``); en todo lo demás, el mismo nombre que ya se
+        usa como ruta de socket (inv. 10: mismo código, el adaptador cambia).
+        """
+        assert self._socket_path is not None
+        if sys.platform == "win32":
+            return _WinPipeSocket(f"\\\\.\\pipe\\{self._socket_path}")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(str(self._socket_path))
+        except OSError:
+            sock.close()
+            raise
+        return sock
+
     def _spawn_and_connect(
         self,
-    ) -> tuple[subprocess.Popen[bytes], socket.socket, str | None]:
+    ) -> tuple[subprocess.Popen[bytes], _IpcSocket, str | None]:
         """
         Lanza mpv, espera (acotado) a que acepte conexiones en el socket y pregunta su
         versión (``None`` si no contesta a tiempo).
@@ -513,11 +676,10 @@ class MpvIpcBackend:
             code = proc.poll()
             if code is not None:
                 raise MpvError(f"mpv salió al arrancar con código {code}")
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
-                sock.connect(str(self._socket_path))
+                sock = self._connect_once()
             except OSError:
-                sock.close()
+                pass
             else:
                 return proc, sock, self._probe_version(sock)
             if time.monotonic() > deadline:
@@ -527,7 +689,7 @@ class MpvIpcBackend:
                 self._dispose(proc, None, grace=0.0)
                 raise MpvError("backend cerrado mientras arrancaba mpv")
 
-    def _probe_version(self, sock: socket.socket) -> str | None:
+    def _probe_version(self, sock: _IpcSocket) -> str | None:
         """
         ``get_property mpv-version`` antes de que exista el hilo lector. Se lee del
         socket **línea a línea** (``MSG_PEEK`` hasta el salto de línea y luego solo esos
@@ -573,7 +735,7 @@ class MpvIpcBackend:
                 pass
 
     def _install_locked(
-        self, proc: subprocess.Popen[bytes], sock: socket.socket, version: str | None
+        self, proc: subprocess.Popen[bytes], sock: _IpcSocket, version: str | None
     ) -> None:
         """Adopta una conexión nueva y reenvía los pendientes en orden."""
         style = loadfile_style(version)
@@ -616,7 +778,7 @@ class MpvIpcBackend:
     def _dispose(
         self,
         proc: subprocess.Popen[bytes] | None,
-        sock: socket.socket | None,
+        sock: _IpcSocket | None,
         *,
         grace: float,
     ) -> None:
@@ -687,7 +849,7 @@ class MpvIpcBackend:
             raise MpvError(f"mpv rechazó {command[0]}: {reply.get('error')}")
         return reply.get("data")
 
-    def _read_loop(self, gen: int, sock: socket.socket) -> None:
+    def _read_loop(self, gen: int, sock: _IpcSocket) -> None:
         """Hilo lector: una línea JSON por mensaje; termina al cerrarse el socket."""
         try:
             with sock.makefile("rb") as stream:
